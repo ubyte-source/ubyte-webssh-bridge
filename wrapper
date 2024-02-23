@@ -1,0 +1,102 @@
+#!/bin/bash
+
+# Checking if the mandatory variables is not same defined
+# Not same defined is the common container wrapper.
+
+declare -a RESPONSE=()
+
+[ -v COUNTRY ] || RESPONSE+=("environment: Specifies the COUNTRY.")
+[ -v STATE ] || RESPONSE+=("environment: Specifies the STATE.")
+[ -v CITY ] || RESPONSE+=("environment: Specifies the CITY.")
+[ -v ORGANIZATION ] || RESPONSE+=("environment: Specifies the ORGANIZATION.")
+[ -v ORGANIZATIONAL_UNIT ] || RESPONSE+=("environment: Specifies the ORGANIZATIONAL_UNIT.")
+[ -v COMMON_NAME ] || RESPONSE+=("environment: Specifies the COMMON_NAME.")
+[ -v HOST ] || RESPONSE+=("environment: Specifies the HOST.")
+[ -v PORT ] || RESPONSE+=("environment: Specifies the PORT.")
+
+# Checking if RESPONSE array is not empty, printing the messages.
+# Calling the runner function to stop the container.
+
+if [ ${#RESPONSE[@]} -ne 0 ]; then
+  printf '%s\n' "${RESPONSE[@]}"
+  exit 0
+fi
+
+# Unsetting RESPONSE array
+
+unset RESPONSE
+
+openssl genrsa -out /data/certificate.key 2048
+openssl req -new -x509 -days 3650 -key /data/certificate.key -out /data/certificate.crt \
+  -subj "/C=${COUNTRY}/ST=${STATE}/L=${CITY}/O=${ORGANIZATION}/OU=${ORGANIZATIONAL_UNIT}/CN=${COMMON_NAME}"
+
+# This line replaces all occurrences of the template string {{SSH_*}}
+
+sed -i "s#{{HOST}}#$HOST#g" /etc/nginx/nginx.conf
+sed -i "s#{{PORT}}#$PORT#g" /etc/nginx/nginx.conf
+
+# Start all process describe in ENV variables.
+# The process running in subshell.
+
+LISTEN="STARTUP_COMMAND_RUN"
+
+# The function is extracting the command to be executed from an environment variable.
+
+process() {
+  local run=${1%%|*}
+  local run=${run##*=}
+  echo $run
+  return 0
+}
+
+printenv | more | grep "${LISTEN}" | while read -r line; do
+  process=$(process "$line")
+  sh -c "$process" &
+done
+
+# Naive check runs checks once a minute to see if either of the processes exited.
+# This illustrates part of the heavy lifting you need to do if you want to run
+# more than one service in a container. The container exits with an error
+# if it detects that either of the processes has exited.
+# Otherwise it loops forever, waking up every 60 seconds
+
+runner() {
+  echo "Stop this container."
+  kill -SIGINT 1
+  exit 1
+}
+
+# The function is extracting the process name from environment variable.
+
+name() {
+  local brew=${1##*|}
+  [[ "$1" == "$brew" ]] && brew=${1##*=}
+  echo "$brew"
+  return 0
+}
+
+trap runner SIGINT SIGQUIT SIGTERM
+
+while
+  sleep 8 &
+  wait $!
+do
+
+  printenv | more | grep "${LISTEN}" | while read -r line; do
+
+    # Grep process status
+
+    process=$(name "$line")
+    ps aux | grep "${process%% *}" | grep -v grep >/dev/null
+
+    # If the greps above find anything, they exit with 0 status
+    # If they are not both 0, then something is wrong
+
+    if [ $? -ne 0 ]; then
+      echo "The processes ${process} already exited."
+      runner
+    fi
+
+  done
+
+done

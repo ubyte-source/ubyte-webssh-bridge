@@ -1,0 +1,10 @@
+div.terminal {
+  width: 100vw;
+  height: 100vh;
+  position: fixed;
+  top: 0;
+  left: 0;
+  overflow: auto;
+  box-sizing: border-box;
+  padding: 1rem;
+}

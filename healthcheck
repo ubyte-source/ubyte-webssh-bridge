@@ -1,0 +1,5 @@
+#!/bin/bash
+
+curl --silent --fail --insecure https://127.0.0.1:8443/healthz || exit 1
+
+exit 0

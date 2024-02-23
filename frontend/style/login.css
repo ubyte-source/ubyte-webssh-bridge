@@ -1,0 +1,64 @@
+div.container {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 100vh;
+  text-align: center;
+  background: #222222;
+  font-family: "proxima-nova", helvetica;
+}
+
+div.container div.parts {
+  width: 20em;
+  background-color: #fff;
+  padding: 1.5em;
+  box-sizing: border-box;
+  border-radius: 0.125em;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+div.container div.parts h5 {
+  font-size: 1.5em;
+  font-weight: 300;
+}
+
+div.container div.parts form.login input,
+div.container div.parts form.login button {
+  display: block;
+  margin: 1.5em auto;
+  width: 100%;
+  max-width: 17.75em;
+  padding: 1em;
+  font-size: 1.125em;
+  border: 0.125em solid #e7e7e7;
+  background: #fcfcfc;
+  border-radius: 0.125em;
+}
+
+div.container div.parts form.login input:focus,
+div.container div.parts form.login button:focus {
+  outline: none;
+}
+div.container div.parts form.login input:focus {
+  background: #f7f7f7;
+  border-color: #e1e1e1;
+}
+
+div.container div.parts form.login button {
+  border: 0.125em solid transparent;
+  color: white;
+  background: #15cd72;
+  margin-bottom: 0;
+  cursor: pointer;
+  transition: background-color 0.3s ease;
+}
+
+div.container div.parts form.login button:hover,
+div.container div.parts form.login button:focus {
+  background-color: #13b864;
+}
