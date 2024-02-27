@@ -70,6 +70,10 @@
       this.element.username = document.createElement("input");
       this.element.username.type = "text";
       this.element.username.setAttribute("placeholder", "Username");
+      this.element.username.setAttribute("autocapitalize", "off");
+      this.element.username.setAttribute("autocorrect", "off");
+      this.element.username.setAttribute("name", "username");
+      this.element.username.setAttribute("id", "username");
       return this.element.username;
     }
 
@@ -82,6 +86,9 @@
       this.element.password = document.createElement("input");
       this.element.password.type = "password";
       this.element.password.setAttribute("placeholder", "Password");
+      this.element.password.setAttribute("autocomplete", "off");
+      this.element.password.setAttribute("name", "secretkey");
+      this.element.password.setAttribute("id", "secretkey");
       return this.element.password;
     }
 
