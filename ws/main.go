@@ -70,7 +70,6 @@ type resizeMessage struct {
 // actionHandler defines a function type for handling actions.
 type actionHandler func(*ssh.Session, []byte) error
 
-
 // handlers maps action strings to their corresponding handler functions.
 var handlers = map[string]actionHandler{
 	"resize": handleResize,
@@ -179,6 +178,21 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		User:            creds.Username,
 		Auth:            []ssh.AuthMethod{ssh.Password(creds.Password)},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Config: ssh.Config{
+			KeyExchanges: []string{
+				"curve25519-sha256",
+				"curve25519-sha256@libssh.org",
+				"ecdh-sha2-nistp256",
+				"ecdh-sha2-nistp384",
+				"ecdh-sha2-nistp521",
+				"diffie-hellman-group14-sha1",
+				"diffie-hellman-group14-sha256",
+				"diffie-hellman-group16-sha512",
+				"diffie-hellman-group18-sha512",
+				"diffie-hellman-group-exchange-sha256",
+				"diffie-hellman-group-exchange-sha1",
+			},
+		},
 	}
 
 	sshConn, err := ssh.Dial("tcp", sshAddr, sshConfig)
