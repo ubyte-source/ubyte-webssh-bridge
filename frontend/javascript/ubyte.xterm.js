@@ -103,6 +103,7 @@
       this.element.button.innerText = "Log In";
       this.element.button.setAttribute(this.constructor.handle(), ":login");
       this.element.button.addEventListener("click", this, true);
+      this.element.button.setAttribute("id", "login_button");
       return this.element.button;
     }
 
@@ -126,7 +127,7 @@
     getForm() {
       if (this.element.hasOwnProperty("form")) return this.element.form;
       this.element.form = document.createElement("form");
-      this.element.form.className = "login";
+      this.element.form.className = "login ftnt-fortinet-grid";
       this.element.form.appendChild(this.getUsername());
       this.element.form.appendChild(this.getPassword());
       this.element.form.appendChild(this.getButton());
