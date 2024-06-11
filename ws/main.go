@@ -73,6 +73,7 @@ type actionHandler func(*ssh.Session, []byte) error
 // handlers maps action strings to their corresponding handler functions.
 var handlers = map[string]actionHandler{
 	"resize": handleResize,
+	"ping":   handlePing,
 }
 
 // debugLog logs debug messages if debug mode is enabled.
@@ -96,6 +97,16 @@ func handleResize(session *ssh.Session, message []byte) error {
 	}
 	debugLog("INFO", "Resizing to cols: %d, rows: %d", resizeMsg.Cols, resizeMsg.Rows)
 	return session.WindowChange(resizeMsg.Rows, resizeMsg.Cols)
+}
+
+// handlePing handles ping messages from the client.
+// @param session the SSH session (not used here).
+// @param message the ping message.
+// @return error indicating success or failure of the ping handling.
+func handlePing(session *ssh.Session, message []byte) error {
+	debugLog("INFO", "Received ping from client")
+	// Respond to the ping if necessary, but typically nothing needs to be done here.
+	return nil
 }
 
 // isAttemptAllowed checks if a new attempt is allowed from the given IP address.
@@ -161,6 +172,12 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer ws.Close()
+
+	// Set the ping handler
+	ws.SetPingHandler(func(appData string) error {
+		debugLog("INFO", "Received ping, sending pong")
+		return ws.WriteControl(websocket.PongMessage, []byte{}, time.Now().Add(time.Second))
+	})
 
 	_, msg, err := ws.ReadMessage()
 	if err != nil {
@@ -248,6 +265,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	go handleWebSocketMessages(ws, stdinPipe, session)
 	go handleSSHOutput(ws, stdoutPipe)
+	go keepAlive(ws)
 
 	if err := session.Shell(); err != nil {
 		debugLog("ERROR", "Error starting shell: %v", err)
@@ -312,6 +330,23 @@ func handleSSHOutput(ws *websocket.Conn, stdoutPipe io.Reader) {
 			debugLog("ERROR", "Error sending output to WebSocket: %v", err)
 			ws.Close()
 			break
+		}
+	}
+}
+
+// keepAlive sends periodic ping messages to the client to keep the connection alive.
+func keepAlive(ws *websocket.Conn) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			if err := ws.WriteMessage(websocket.PingMessage, []byte{}); err != nil {
+				debugLog("ERROR", "Error sending ping: %v", err)
+				ws.Close()
+				return
+			}
 		}
 	}
 }

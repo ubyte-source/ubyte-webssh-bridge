@@ -40,6 +40,15 @@
       ws.send(message);
     });
 
+    // Function to send a ping message to the server
+    function sendPing(ws) {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          action: 'ping'
+        }));
+      }
+    }
+
     // Set a callback function to handle authentication actions.
     element.setCallback(function () {
       // Define the WebSocket URI based on the current location.
@@ -84,6 +93,9 @@
 
         // Fit the terminal within its container.
         terminal.getFitAddon().fit();
+
+        // Set an interval to send pings every 30 seconds.
+        setInterval(() => sendPing(ws), 30000);
       });
     });
 
@@ -91,9 +103,7 @@
     document.body.appendChild(element.getContainer());
 
     // Add a window resize event listener to adjust the terminal's size.
-    window.addEventListener("resize", () => {
-      terminal.getFitAddon().fit()
-    }, false);
+    window.addEventListener("resize", () => terminal.getFitAddon().fit(), false);
   </script>
 </body>
 
