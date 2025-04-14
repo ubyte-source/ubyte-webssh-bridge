@@ -8,7 +8,7 @@ RUN go mod download
 RUN go mod tidy
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -buildvcs=false -o ubyte-webssh-bridge .
 
-FROM amd64/alpine:3.19.1
+FROM amd64/alpine:3.21.3
 
 ENV STARTUP_COMMAND_RUN_NGINX="nginx"
 ENV STARTUP_COMMAND_RUN_UBYTE="/usr/local/bin/ubyte-webssh-bridge | ubyte-webssh-bridge"

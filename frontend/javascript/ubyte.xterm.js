@@ -4,7 +4,6 @@
   /**
    * A class representation for creating and managing UI elements specifically for authentication purposes.
    */
-
   class UElement {
     /**
      * Returns the attribute name used for handling events.
@@ -174,7 +173,6 @@
         if (execute.length !== 2) break;
         if (execute[0] === event.type || 0 === execute[0].length) {
           if (typeof this[execute[1]] !== "function") continue;
-
           this[execute[1]].call(this, event);
         }
       }
@@ -244,10 +242,7 @@
 
       // Initializes a new UElement instance, passing this authentication instance to it.
       // This allows the UElement to use authentication-related functionalities and properties.
-
-      this.element = new window.Terminal.UTerminal.UAuthentication.UElement(
-        this
-      );
+      this.element = new window.Terminal.UTerminal.UAuthentication.UElement(this);
     }
 
     /**
@@ -356,6 +351,19 @@
       this.socket.web.binaryType = "arraybuffer";
       return this;
     }
+
+    /**
+     * Sends a message through the WebSocket.
+     * The message can be a string or an ArrayBuffer.
+     * @param {string|ArrayBuffer} message - The message to send.
+     */
+    sendMessage(message) {
+      if (this.socket.web && this.socket.web.readyState === WebSocket.OPEN) {
+        this.socket.web.send(message);
+      } else {
+        console.warn("WebSocket is not available or open to send:", message);
+      }
+    }
   }
 
   /**
@@ -368,15 +376,15 @@
      * for the terminal's operation including WebSocket connections and authentication modules.
      */
     constructor() {
+      // Placeholder for terminal-related elements.
+      this.element = {};
       // Initialize the WebSocket connection component.
       this.mount = {};
       this.mount.websocket = new window.Terminal.UTerminal.UWebSocket(this);
       // Initialize the authentication module.
       this.mount.authentication = new window.Terminal.UTerminal.UAuthentication(this);
       // Initialize the gesture.
-      this.mount.authentication = new window.Terminal.UGesture(this);
-      // Placeholder for terminal-related elements.
-      this.element = {};
+      this.mount.gesture = new window.Terminal.UGesture(this);
       // Automatically load the terminal fit addon upon initialization.
       this.instance().loadAddon(this.getFitAddon());
     }
@@ -441,20 +449,28 @@
   }
 
   /**
- * New class for managing touch gestures on mobile devices.
- * Listens for touch events to simulate arrow key presses (ArrowUp and ArrowDown).
- */
+   * New class for managing touch gestures on mobile devices.
+   * Listens for touch events to simulate arrow key and tab presses.
+   *
+   * This class:
+   * - Records the initial touch coordinates.
+   * - Determines the swipe direction upon touch end.
+   * - If a horizontal swipe to the right is detected, sends a Tab key command.
+   * - If a vertical swipe (up or down) is detected, sends the corresponding Arrow key command.
+   * - Sends commands as binary messages including the necessary ANSI escape sequences.
+   */
   class UGesture {
     /**
      * Constructs a new UGesture instance.
-     * @param {UTerminal} - The instance terminal who attach event listeners.
+     * @param {UTerminal} terminal - The terminal instance to which event listeners will be attached.
      */
     constructor(terminal) {
       this.terminal = terminal;
       this.threshold = 30; // Minimum threshold in pixels to recognize a swipe.
+      this.touchStartPosition = null; // Will store an object with x and y coordinates.
+      // Bind event handlers to this instance.
       this.touchStart = this.onTouchStart.bind(this);
       this.touchEnd = this.onTouchEnd.bind(this);
-      this.touchStartPosition = null;
       this.addListeners();
     }
 
@@ -467,61 +483,102 @@
     }
 
     /**
-     * Adds touch event listeners to the element.
-     * @private
+     * Adds touch event listeners to the terminal's container.
      */
     addListeners() {
-      const passive = {
-        passive: true
-      };
-      this.getTerminal().getContainer().addEventListener("touchstart", this.touchStart, passive);
-      this.getTerminal().getContainer().addEventListener("touchend", this.touchEnd, passive);
+      const passiveOptions = { passive: true };
+      this.getTerminal().getContainer().addEventListener("touchstart", this.touchStart, passiveOptions);
+      this.getTerminal().getContainer().addEventListener("touchend", this.touchEnd, passiveOptions);
     }
 
     /**
-     * Handles the touchstart event by recording the starting Y coordinate.
-     * @param {TouchEvent} e - The touchstart event.
+     * Handles the touchstart event by recording the initial touch position.
+     * @param {TouchEvent} event - The touchstart event.
      */
-    onTouchStart(e) {
-      if (e.touches.length === 1) {
-        this.touchStartPosition = e.touches[0].clientY;
+    onTouchStart(event) {
+      if (event.touches.length === 1) {
+        this.touchStartPosition = {
+          x: event.touches[0].clientX,
+          y: event.touches[0].clientY
+        };
       }
     }
 
     /**
-     * Handles the touchend event by comparing the end Y coordinate to the start.
-     * Simulates an arrow key press if the swipe exceeds the threshold.
-     * @param {TouchEvent} e - The touchend event.
+     * Handles the touchend event by determining the swipe direction and sending the corresponding binary command.
+     * If a horizontal swipe to the right is detected (exceeding the threshold), a Tab key command is sent.
+     * Otherwise, if a vertical swipe is detected, the appropriate Arrow key is sent.
+     * @param {TouchEvent} event - The touchend event.
      */
-    onTouchEnd(e) {
-      if (this.touchStartPosition === null) return;
-      const touchEndY = e.changedTouches[0].clientY;
-      const diffY = this.touchStartPosition - touchEndY;
-      if (Math.abs(diffY) >= this.threshold) {
-        const key = diffY > 0
-          ? "ArrowUp"
-          : "ArrowDown";
-        this.simulateKey(key);
+    onTouchEnd(event) {
+      if (!this.touchStartPosition) return;
+
+      const touchEndX = event.changedTouches[0].clientX;
+      const touchEndY = event.changedTouches[0].clientY;
+
+      const diffX = touchEndX - this.touchStartPosition.x;
+      const diffY = touchEndY - this.touchStartPosition.y;
+
+      // Check if horizontal swipe is dominant and exceeds the threshold.
+      if (Math.abs(diffX) > Math.abs(diffY) && Math.abs(diffX) > this.threshold) {
+        if (diffX > 0) {
+          this.sendBinaryCommand("Tab");
+        }
       }
+      // Otherwise, check for vertical swipe exceeding the threshold.
+      else if (Math.abs(diffY) > this.threshold) {
+        if (diffY < 0) {
+          this.sendBinaryCommand("ArrowUp");
+        } else {
+          this.sendBinaryCommand("ArrowDown");
+        }
+      }
+      // Reset the touch start position.
       this.touchStartPosition = null;
     }
 
     /**
-     * Simulates a keydown event for the specified key.
-     * @param {string} key - The key to simulate.
+     * Returns the binary command for a given key.
+     * Mappings in this example:
+     *   "ArrowUp"   -> ESC [ A  (0x1B, 0x5B, 0x41)
+     *   "ArrowDown" -> ESC [ B  (0x1B, 0x5B, 0x42)
+     *   "Tab"       -> Tab      (0x09)
+     * @param {string} key - The key command ("ArrowUp", "ArrowDown", or "Tab").
+     * @returns {Uint8Array|null} The binary command as a Uint8Array, or null if key is unhandled.
      */
-    simulateKey(key) {
-      const event = new KeyboardEvent("keydown", {
-        key: key,
-        code: key,
-        bubbles: true,
-        cancelable: true
-      });
-      document.dispatchEvent(event);
+    getBinaryCommand(key) {
+      switch (key) {
+        case "ArrowUp":
+          return new Uint8Array([0x1B, 0x5B, 0x41]);
+        case "ArrowDown":
+          return new Uint8Array([0x1B, 0x5B, 0x42]);
+        case "Tab":
+          return new Uint8Array([0x09]);
+        default:
+          console.warn("Unhandled key in getBinaryCommand:", key);
+          return null;
+      }
     }
 
     /**
-     * Removes the touch event listeners.
+     * Sends the binary command corresponding to the given key via the WebSocket.
+     * @param {string} key - The key command ("ArrowUp", "ArrowDown", or "Tab").
+     */
+    sendBinaryCommand(key) {
+      const binaryMessage = this.getBinaryCommand(key);
+      if (null == binaryMessage) return;
+
+      // Retrieve the WebSocket instance from the terminal and send the binary message.
+      const ws = this.getTerminal().getWebSocket();
+      if (ws && typeof ws.sendMessage === "function") {
+        ws.sendMessage(binaryMessage.buffer);
+      } else {
+        console.warn("WebSocket is not available. Unable to send:", key);
+      }
+    }
+
+    /**
+     * Removes the touch event listeners from the terminal's container.
      */
     dispose() {
       this.getTerminal().getContainer().removeEventListener("touchstart", this.touchStart);
