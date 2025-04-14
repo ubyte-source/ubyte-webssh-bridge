@@ -1,7 +1,8 @@
+package main
+
 // Package main implements a WebSocket-based SSH client.
 // It supports resizing the terminal, handling SSH sessions,
 // and user authentication via WebSockets.
-package main
 
 import (
 	"encoding/json"
@@ -43,8 +44,8 @@ func init() {
 
 // upgrader is a WebSocket upgrader configuration that allows any origin.
 var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
+	ReadBufferSize:  8192,
+	WriteBufferSize: 8192,
 	CheckOrigin: func(r *http.Request) bool {
 		return true
 	},
@@ -172,6 +173,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer ws.Close()
+	ws.SetReadLimit(1024 * 512) // 512 KB
 
 	// Set the ping handler
 	ws.SetPingHandler(func(appData string) error {
@@ -311,25 +313,55 @@ func handleWebSocketMessages(ws *websocket.Conn, stdinPipe io.WriteCloser, sessi
 }
 
 // handleSSHOutput forwards SSH session output to the WebSocket.
+// This version accumulates data in a buffer and periodically sends batched output
+// to improve the user experience by reducing fragmentation.
 // @param ws the WebSocket connection.
 // @param stdoutPipe the stdout pipe of the SSH session.
 func handleSSHOutput(ws *websocket.Conn, stdoutPipe io.Reader) {
-	buf := make([]byte, 1024)
+	buf := make([]byte, 8192)
+	var data []byte
+	ticker := time.NewTicker(50 * time.Millisecond) // flush every 50ms
+	defer ticker.Stop()
+
 	for {
 		n, err := stdoutPipe.Read(buf)
+		if n > 0 {
+			data = append(data, buf[:n]...)
+			// If accumulated data exceeds threshold, flush immediately
+			if len(data) >= 16384 { // 16 KB threshold
+				if err := ws.WriteMessage(websocket.BinaryMessage, data); err != nil {
+					debugLog("ERROR", "Error sending batched output to WebSocket: %v", err)
+					ws.Close()
+					return
+				}
+				data = nil
+			}
+		}
 		if err != nil {
 			if err == io.EOF {
 				debugLog("INFO", "SSH session closed.")
 			} else {
 				debugLog("ERROR", "Error reading SSH output: %v", err)
 			}
+			// Flush any remaining data before closing
+			if len(data) > 0 {
+				ws.WriteMessage(websocket.BinaryMessage, data)
+			}
 			ws.Close()
 			break
 		}
-		if err := ws.WriteMessage(websocket.BinaryMessage, buf[:n]); err != nil {
-			debugLog("ERROR", "Error sending output to WebSocket: %v", err)
-			ws.Close()
-			break
+		select {
+		case <-ticker.C:
+			if len(data) > 0 {
+				if err := ws.WriteMessage(websocket.BinaryMessage, data); err != nil {
+					debugLog("ERROR", "Error sending batched output to WebSocket: %v", err)
+					ws.Close()
+					return
+				}
+				data = nil
+			}
+		default:
+			// Continue without blocking
 		}
 	}
 }
@@ -339,14 +371,11 @@ func keepAlive(ws *websocket.Conn) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
-	for {
-		select {
-		case <-ticker.C:
-			if err := ws.WriteMessage(websocket.PingMessage, []byte{}); err != nil {
-				debugLog("ERROR", "Error sending ping: %v", err)
-				ws.Close()
-				return
-			}
+	for range ticker.C {
+		if err := ws.WriteMessage(websocket.PingMessage, []byte{}); err != nil {
+			debugLog("ERROR", "Error sending ping: %v", err)
+			ws.Close()
+			return
 		}
 	}
 }

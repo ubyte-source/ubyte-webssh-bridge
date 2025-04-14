@@ -219,8 +219,8 @@
     static removeElementDOM(element) {
       let parent =
         element === null ||
-        typeof element === "undefined" ||
-        typeof element.parentNode === "undefined"
+          typeof element === "undefined" ||
+          typeof element.parentNode === "undefined"
           ? null
           : element.parentNode;
       if (parent === null) return false;
@@ -372,9 +372,9 @@
       this.mount = {};
       this.mount.websocket = new window.Terminal.UTerminal.UWebSocket(this);
       // Initialize the authentication module.
-      this.mount.authentication = new window.Terminal.UTerminal.UAuthentication(
-        this
-      );
+      this.mount.authentication = new window.Terminal.UTerminal.UAuthentication(this);
+      // Initialize the gesture.
+      this.mount.authentication = new window.Terminal.UGesture(this);
       // Placeholder for terminal-related elements.
       this.element = {};
       // Automatically load the terminal fit addon upon initialization.
@@ -440,6 +440,98 @@
     }
   }
 
+  /**
+ * New class for managing touch gestures on mobile devices.
+ * Listens for touch events to simulate arrow key presses (ArrowUp and ArrowDown).
+ */
+  class UGesture {
+    /**
+     * Constructs a new UGesture instance.
+     * @param {UTerminal} - The instance terminal who attach event listeners.
+     */
+    constructor(terminal) {
+      this.terminal = terminal;
+      this.threshold = 30; // Minimum threshold in pixels to recognize a swipe.
+      this.touchStart = this.onTouchStart.bind(this);
+      this.touchEnd = this.onTouchEnd.bind(this);
+      this.touchStartPosition = null;
+      this.addListeners();
+    }
+
+    /**
+     * Retrieves the terminal instance associated with this gesture.
+     * @returns {UTerminal} The terminal instance.
+     */
+    getTerminal() {
+      return this.terminal;
+    }
+
+    /**
+     * Adds touch event listeners to the element.
+     * @private
+     */
+    addListeners() {
+      const passive = {
+        passive: true
+      };
+      this.getTerminal().getContainer().addEventListener("touchstart", this.touchStart, passive);
+      this.getTerminal().getContainer().addEventListener("touchend", this.touchEnd, passive);
+    }
+
+    /**
+     * Handles the touchstart event by recording the starting Y coordinate.
+     * @param {TouchEvent} e - The touchstart event.
+     */
+    onTouchStart(e) {
+      if (e.touches.length === 1) {
+        this.touchStartPosition = e.touches[0].clientY;
+      }
+    }
+
+    /**
+     * Handles the touchend event by comparing the end Y coordinate to the start.
+     * Simulates an arrow key press if the swipe exceeds the threshold.
+     * @param {TouchEvent} e - The touchend event.
+     */
+    onTouchEnd(e) {
+      if (this.touchStartPosition === null) return;
+      const touchEndY = e.changedTouches[0].clientY;
+      const diffY = this.touchStartPosition - touchEndY;
+      if (Math.abs(diffY) >= this.threshold) {
+        const key = diffY > 0
+          ? "ArrowUp"
+          : "ArrowDown";
+        this.simulateKey(key);
+      }
+      this.touchStartPosition = null;
+    }
+
+    /**
+     * Simulates a keydown event for the specified key.
+     * @param {string} key - The key to simulate.
+     */
+    simulateKey(key) {
+      const event = new KeyboardEvent("keydown", {
+        key: key,
+        code: key,
+        bubbles: true,
+        cancelable: true
+      });
+      document.dispatchEvent(event);
+    }
+
+    /**
+     * Removes the touch event listeners.
+     */
+    dispose() {
+      this.getTerminal().getContainer().removeEventListener("touchstart", this.touchStart);
+      this.getTerminal().getContainer().removeEventListener("touchend", this.touchEnd);
+    }
+  }
+
+  // Attaches the UGesture class to the window.Terminal namespace, making it accessible for use in the terminal application.
+  window.Terminal.UGesture = UGesture;
+
   // Assigns the FitAddon class to the window.Terminal object, making the FitAddon functionality globally accessible.
   // This is particularly useful for terminal applications that need to dynamically adjust the terminal's size to fit its container.
   window.Terminal.FitAddon = FitAddon.FitAddon;
@@ -459,4 +551,5 @@
   // Further nests the UElement class under the UAuthentication namespace, providing a structured way to access UI elements
   // related to authentication, such as form inputs and buttons, ensuring a modular approach to building the application's UI.
   window.Terminal.UTerminal.UAuthentication.UElement = UElement;
+
 })(window);
