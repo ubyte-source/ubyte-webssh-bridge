@@ -41,4 +41,4 @@ USER www
 
 HEALTHCHECK --interval=12s --timeout=4s CMD /usr/sbin/healthcheck
 
-ENTRYPOINT /usr/sbin/wrapper
+ENTRYPOINT [ "/usr/sbin/wrapper" ]

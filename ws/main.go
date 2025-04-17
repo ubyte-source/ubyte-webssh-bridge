@@ -519,6 +519,8 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
  */
 func main() {
 	http.HandleFunc("/ws/", handleWebSocket)
-	logrus.Infof("Server started on address %s", listenAddress)
-	logrus.Fatal(http.ListenAndServe(listenAddress, nil))
+	logrus.Infof("Secure server started on address %s", listenAddress)
+	if err := http.ListenAndServeTLS(listenAddress, "/data/certificate.crt", "/data/certificate.key", nil); err != nil {
+		logrus.Fatalf("ListenAndServeTLS error: %v", err)
+	}
 }
