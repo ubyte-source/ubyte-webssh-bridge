@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# Checking if the mandatory variables is not same defined
-# Not same defined is the common container wrapper.
+# Check that all mandatory variables are defined.
+# This script serves as the common container wrapper.
 
 declare -a RESPONSE=()
 
