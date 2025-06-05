@@ -142,21 +142,6 @@ func isAttemptAllowed(destIP string) bool {
 }
 
 /**
- * recordAttemptAndScheduleCleanup records an SSH connection attempt and schedules cleanup.
- * @param destIP The destination IP address.
- */
-func recordAttemptAndScheduleCleanup(destIP string) {
-    attemptsLock.Lock()
-    lastAttempt[destIP] = time.Now()
-    attemptsLock.Unlock()
-    time.AfterFunc(attemptInterval, func() {
-        attemptsLock.Lock()
-        delete(lastAttempt, destIP)
-        attemptsLock.Unlock()
-    })
-}
-
-/**
  * canAttemptNow checks if a new SSH connection attempt can proceed.
  * @param destIP The destination IP address.
  * @return True if the attempt is allowed, false otherwise.
@@ -164,9 +149,16 @@ func recordAttemptAndScheduleCleanup(destIP string) {
 func canAttemptNow(destIP string) bool {
     attemptsLock.Lock()
     allowed := isAttemptAllowed(destIP)
+    if allowed {
+        lastAttempt[destIP] = time.Now()
+    }
     attemptsLock.Unlock()
     if allowed {
-        recordAttemptAndScheduleCleanup(destIP)
+        time.AfterFunc(attemptInterval, func() {
+            attemptsLock.Lock()
+            delete(lastAttempt, destIP)
+            attemptsLock.Unlock()
+        })
     }
     return allowed
 }
