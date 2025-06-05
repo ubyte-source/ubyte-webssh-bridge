@@ -27,7 +27,7 @@ Start the server with the default settings using:
 ./ubyte-webssh-bridge
 ```
 
-This will listen on `127.0.0.1:8080` by default.
+This will listen on `:8080` by default.
 
 ### Configuration Options
 
