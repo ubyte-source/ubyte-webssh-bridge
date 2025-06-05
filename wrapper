@@ -5,14 +5,14 @@
 
 declare -a RESPONSE=()
 
-[ -v COUNTRY ] || RESPONSE+=("environment: Specifies the COUNTRY.")
-[ -v STATE ] || RESPONSE+=("environment: Specifies the STATE.")
-[ -v CITY ] || RESPONSE+=("environment: Specifies the CITY.")
-[ -v ORGANIZATION ] || RESPONSE+=("environment: Specifies the ORGANIZATION.")
-[ -v ORGANIZATIONAL_UNIT ] || RESPONSE+=("environment: Specifies the ORGANIZATIONAL_UNIT.")
-[ -v COMMON_NAME ] || RESPONSE+=("environment: Specifies the COMMON_NAME.")
-[ -v HOST ] || RESPONSE+=("environment: Specifies the HOST.")
-[ -v PORT ] || RESPONSE+=("environment: Specifies the PORT.")
+[[ -v COUNTRY ]] || RESPONSE+=("environment: Specifies the COUNTRY.")
+[[ -v STATE ]] || RESPONSE+=("environment: Specifies the STATE.")
+[[ -v CITY ]] || RESPONSE+=("environment: Specifies the CITY.")
+[[ -v ORGANIZATION ]] || RESPONSE+=("environment: Specifies the ORGANIZATION.")
+[[ -v ORGANIZATIONAL_UNIT ]] || RESPONSE+=("environment: Specifies the ORGANIZATIONAL_UNIT.")
+[[ -v COMMON_NAME ]] || RESPONSE+=("environment: Specifies the COMMON_NAME.")
+[[ -v HOST ]] || RESPONSE+=("environment: Specifies the HOST.")
+[[ -v PORT ]] || RESPONSE+=("environment: Specifies the PORT.")
 
 # Checking if RESPONSE array is not empty, printing the messages.
 # Calling the runner function to stop the container.
