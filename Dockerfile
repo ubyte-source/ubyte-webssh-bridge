@@ -6,7 +6,7 @@ WORKDIR /app
 
 RUN go mod download
 RUN go mod tidy
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -buildvcs=false -o ubyte-webssh-bridge .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -buildvcs=false -o ubyte-webssh-bridge .
 
 FROM amd64/alpine:3.21.3
 
