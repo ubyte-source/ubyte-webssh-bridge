@@ -195,7 +195,9 @@ func dialSSHWithTimeout(network, addr string, config *ssh.ClientConfig) (*ssh.Cl
 	// Perform SSH handshake with the established connection
 	sshConn, chans, reqs, err := ssh.NewClientConn(conn, addr, config)
 	if err != nil {
-		conn.Close()
+		if closeErr := conn.Close(); closeErr != nil {
+			debugLog("ERROR", "Failed to close connection: %v", closeErr)
+		}
 		debugLog("ERROR", "SSH handshake failed to %s: %v", addr, err)
 		return nil, fmt.Errorf("SSH handshake failed: %v", err)
 	}
@@ -228,11 +230,21 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		log.Printf("WebSocket upgrade error: %v", err)
 		return
 	}
-	defer ws.Close()
+	defer func() {
+		if err := ws.Close(); err != nil {
+			debugLog("ERROR", "Failed to close WebSocket: %v", err)
+		}
+	}()
 
 	// Set extended timeouts for WebSocket operations to handle RADIUS delays
-	ws.SetReadDeadline(time.Now().Add(sshHandshakeTimeout))
-	ws.SetWriteDeadline(time.Now().Add(30 * time.Second))
+	if err := ws.SetReadDeadline(time.Now().Add(sshHandshakeTimeout)); err != nil {
+		debugLog("ERROR", "Failed to set WebSocket read deadline: %v", err)
+		return
+	}
+	if err := ws.SetWriteDeadline(time.Now().Add(30 * time.Second)); err != nil {
+		debugLog("ERROR", "Failed to set WebSocket write deadline: %v", err)
+		return
+	}
 
 	// Set the ping handler
 	ws.SetPingHandler(func(appData string) error {
@@ -290,14 +302,22 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Error connecting to SSH with extended timeout: %v", err)
 		return
 	}
-	defer sshConn.Close()
+	defer func() {
+		if err := sshConn.Close(); err != nil {
+			debugLog("ERROR", "Failed to close SSH connection: %v", err)
+		}
+	}()
 
 	session, err := sshConn.NewSession()
 	if err != nil {
 		log.Printf("Error creating SSH session: %v", err)
 		return
 	}
-	defer session.Close()
+	defer func() {
+		if err := session.Close(); err != nil {
+			debugLog("ERROR", "Failed to close SSH session: %v", err)
+		}
+	}()
 
 	modes := ssh.TerminalModes{
 		ssh.ECHO:          1,
@@ -314,7 +334,11 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		debugLog("ERROR", "Error obtaining stdin pipe: %v", err)
 		return
 	}
-	defer stdinPipe.Close()
+	defer func() {
+		if err := stdinPipe.Close(); err != nil {
+			debugLog("ERROR", "Failed to close stdin pipe: %v", err)
+		}
+	}()
 
 	stdoutPipe, err := session.StdoutPipe()
 	if err != nil {
@@ -332,7 +356,9 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		debugLog("ERROR", "Error starting shell: %v", err)
 		return
 	}
-	session.Wait()
+	if err := session.Wait(); err != nil {
+		debugLog("ERROR", "Session wait error: %v", err)
+	}
 }
 
 // handleWebSocketMessages reads messages from the WebSocket and handles them.
@@ -340,7 +366,11 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 // @param stdinPipe the stdin pipe of the SSH session.
 // @param session the SSH session.
 func handleWebSocketMessages(ws *websocket.Conn, stdinPipe io.WriteCloser, session *ssh.Session) {
-	defer stdinPipe.Close()
+	defer func() {
+		if err := stdinPipe.Close(); err != nil {
+			debugLog("ERROR", "Failed to close stdin pipe in message handler: %v", err)
+		}
+	}()
 
 	for {
 		_, message, err := ws.ReadMessage()
@@ -368,7 +398,9 @@ func handleWebSocketMessages(ws *websocket.Conn, stdinPipe io.WriteCloser, sessi
 		}
 	}
 
-	session.Close()
+	if err := session.Close(); err != nil {
+		debugLog("ERROR", "Failed to close session in message handler: %v", err)
+	}
 }
 
 // handleSSHOutput forwards SSH session output to the WebSocket.
@@ -384,12 +416,16 @@ func handleSSHOutput(ws *websocket.Conn, stdoutPipe io.Reader) {
 			} else {
 				debugLog("ERROR", "Error reading SSH output: %v", err)
 			}
-			ws.Close()
+			if err := ws.Close(); err != nil {
+				debugLog("ERROR", "Failed to close WebSocket in SSH output handler: %v", err)
+			}
 			break
 		}
 		if err := ws.WriteMessage(websocket.BinaryMessage, buf[:n]); err != nil {
 			debugLog("ERROR", "Error sending output to WebSocket: %v", err)
-			ws.Close()
+			if err := ws.Close(); err != nil {
+				debugLog("ERROR", "Failed to close WebSocket after write error: %v", err)
+			}
 			break
 		}
 	}
@@ -403,7 +439,9 @@ func keepAlive(ws *websocket.Conn) {
 	for range ticker.C {
 		if err := ws.WriteMessage(websocket.PingMessage, []byte{}); err != nil {
 			debugLog("ERROR", "Error sending ping: %v", err)
-			ws.Close()
+			if err := ws.Close(); err != nil {
+				debugLog("ERROR", "Failed to close WebSocket in keepAlive: %v", err)
+			}
 			return
 		}
 	}
