@@ -1,102 +1,293 @@
 # Ubyte WebSSH Bridge
 
-Ubyte WebSSH Bridge is an innovative WebSocket-based SSH client that enables secure and interactive SSH sessions directly from your web browser. This project leverages modern web technologies to provide an easy-to-use interface for managing SSH connections, supporting features like terminal resizing and user authentication.
+[![Go Version](https://img.shields.io/badge/Go-1.23+-blue.svg)](https://golang.org)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Docker](https://img.shields.io/badge/Docker-Supported-blue.svg)](https://hub.docker.com/r/ubyte/ubyte-webssh-bridge)
 
-## Features
+Ubyte WebSSH Bridge is a high-performance, enterprise-grade WebSocket-to-SSH gateway that enables secure SSH connections directly from web browsers. Built with Go, it provides a robust, scalable solution for web-based terminal access with advanced features like connection management, rate limiting, health monitoring, and comprehensive security controls.
 
-- **WebSocket-based SSH Connection**: Secure and real-time communication between the client and SSH server.
-- **Terminal Resizing**: Dynamically adjust the size of the terminal according to the browser window.
-- **User Authentication**: Supports username and password authentication for SSH sessions.
-- **Debug Mode**: Includes a debug mode for logging detailed information during development or troubleshooting.
+## 🏗️ Architecture Overview
 
-## Installation
+```mermaid
+graph TB
+    subgraph "Client Layer"
+        Browser["🌐 Web Browser"]
+        Terminal["📟 xterm.js Terminal"]
+    end
 
-To install Ubyte WebSSH Bridge, ensure you have Go installed on your system. Follow these steps:
+    subgraph "Frontend Layer"
+        WebUI["🎨 Web Interface"]
+        Auth["🔐 Authentication Form"]
+    end
+
+    subgraph "WebSocket Layer"
+        WSServer["🔌 WebSocket Server"]
+        TLS["🔒 TLS Termination"]
+    end
+
+    subgraph "Application Layer"
+        ConnMgr["📊 Connection Manager"]
+        RateLim["⏱️ Rate Limiter"]
+        MsgProc["📨 Message Processor"]
+        SessionMgr["🎯 Session Manager"]
+    end
+
+    subgraph "SSH Layer"
+        SSHClient["🔧 SSH Client"]
+        SSHTimeouts["⏰ Timeout Manager"]
+    end
+
+    Browser --> Terminal
+    Terminal --> WebUI
+    WebUI --> Auth
+    Auth --> TLS
+    TLS --> WSServer
+    WSServer --> ConnMgr
+    ConnMgr --> RateLim
+    ConnMgr --> SessionMgr
+    SessionMgr --> MsgProc
+    MsgProc --> SSHClient
+    SSHClient --> SSHTimeouts
+```
+
+## ✨ Key Features
+
+- **🔐 Enterprise Security**: TLS encryption, rate limiting, connection limits, IP whitelisting
+- **📊 Advanced Monitoring**: Health checks, metrics endpoints, structured logging
+- **⚡ High Performance**: Configurable buffers, connection pooling, optimized timeouts
+- **🔧 Flexible Configuration**: Environment variables, command-line options, validation
+- **🌐 Modern Web Interface**: Responsive design, xterm.js integration, auto-resize
+- **🔄 Session Management**: Connection limits, automatic cleanup, thread-safe operations
+
+## 🚀 Quick Start
+
+### 1. Download & Run
+
+```bash
+# Download binary
+wget https://github.com/ubyte-source/ubyte-webssh-bridge/releases/latest/download/ubyte-webssh-bridge
+chmod +x ubyte-webssh-bridge
+
+# Generate certificates
+openssl req -x509 -newkey rsa:4096 -keyout certificate.key -out certificate.crt -days 365 -nodes
+
+# Start server
+./ubyte-webssh-bridge -cert=certificate.crt -key=certificate.key
+```
+
+### 2. Access Interface
+
+Open `https://localhost:8080` and connect to SSH servers using:
+
+```
+https://localhost:8080/ws/{SSH_HOST}/{SSH_PORT}
+```
+
+### 3. Docker Deployment
+
+```bash
+docker run -d --name webssh-bridge -p 8443:8443 \
+  -e COUNTRY="US" \
+  -e STATE="California" \
+  -e ORGANIZATION="Your Organization" \
+  -e COMMON_NAME="your-domain.com" \
+  ubyte/ubyte-webssh-bridge:latest
+```
+
+## 📚 Documentation
+
+### 🔧 Core Components
+
+| Component              | Description                                             | Documentation                                |
+| ---------------------- | ------------------------------------------------------- | -------------------------------------------- |
+| **Server**             | HTTP/WebSocket server, TLS termination, request routing | [📖 ws/server/](ws/server/README.md)         |
+| **Configuration**      | System configuration, validation, environment variables | [📖 ws/config/](ws/config/README.md)         |
+| **Connection Manager** | Session lifecycle, connection limits, resource cleanup  | [📖 ws/connection/](ws/connection/README.md) |
+| **SSH Client**         | SSH connections, timeouts, RADIUS support               | [📖 ws/ssh/](ws/ssh/README.md)               |
+| **Message Processing** | WebSocket messages, protocol handling, action dispatch  | [📖 ws/message/](ws/message/README.md)       |
+| **Rate Limiting**      | IP-based rate limiting, whitelist management            | [📖 ws/utils/](ws/utils/README.md)           |
+
+### 🌐 Frontend & Integration
+
+| Component               | Description                                | Documentation                      |
+| ----------------------- | ------------------------------------------ | ---------------------------------- |
+| **Web Interface**       | HTML/CSS/JS frontend, xterm.js integration | [📖 frontend/](frontend/README.md) |
+| **Nginx Configuration** | Reverse proxy setup, load balancing        | [📖 nginx/](nginx/README.md)       |
+
+## ⚙️ Configuration
+
+### Command Line Options
+
+```bash
+./ubyte-webssh-bridge \
+  -address=":8443" \
+  -cert="/path/to/cert.pem" \
+  -key="/path/to/key.pem" \
+  -debug=false
+```
+
+### Environment Variables (Docker)
+
+```bash
+# Certificate generation
+COUNTRY="US"
+STATE="California"
+CITY="San Francisco"
+ORGANIZATION="Your Organization"
+COMMON_NAME="your-domain.com"
+
+# Default SSH target (optional)
+HOST="192.168.1.100"
+PORT="22"
+```
+
+**👉 For complete configuration options:** [📖 Configuration Guide](ws/config/README.md)
+
+## 🔌 API Reference
+
+### WebSocket Connection
+
+```
+wss://{server}:{port}/ws/{ssh_host}/{ssh_port}
+```
+
+### HTTP Endpoints
+
+- `GET /health` - Health check and status
+- `GET /metrics` - Performance metrics and statistics
+
+**👉 For complete API documentation:** [📖 Server Documentation](ws/server/README.md)
+
+## 🐳 Deployment
+
+### Docker Compose
+
+```yaml
+version: "3.8"
+services:
+  webssh-bridge:
+    image: ubyte/ubyte-webssh-bridge:latest
+    ports:
+      - "8443:8443"
+    environment:
+      - COUNTRY=US
+      - STATE=California
+      - ORGANIZATION=Your Organization
+      - COMMON_NAME=your-domain.com
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "https://localhost:8443/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+```
+
+### Production Checklist
+
+- [ ] Valid TLS certificates installed
+- [ ] Rate limiting configured
+- [ ] Connection limits set
+- [ ] Monitoring enabled
+- [ ] Firewall rules configured
+- [ ] SSH servers hardened
+
+## 🔒 Security Features
+
+- **🔐 TLS Encryption**: Mandatory HTTPS/WSS connections
+- **⏱️ Rate Limiting**: Configurable per-IP with whitelist support
+- **📊 Connection Limits**: Global and per-host restrictions
+- **🛡️ Input Validation**: Comprehensive message validation
+- **📝 Audit Logging**: Structured logging with detailed events
+
+**👉 For security best practices:** [📖 Security Documentation](ws/server/README.md#-security-features)
+
+## 📊 Monitoring
+
+### Health Check
+
+```bash
+curl -k https://localhost:8443/health
+```
+
+### Metrics
+
+```bash
+curl -k https://localhost:8443/metrics
+```
+
+**👉 For monitoring setup:** [📖 Server Monitoring](ws/server/README.md#-monitoring-endpoints)
+
+## 🛠️ Development
+
+### Build from Source
 
 ```bash
 git clone https://github.com/ubyte-source/ubyte-webssh-bridge.git
-cd ubyte-webssh-bridge
-go build .
+cd ubyte-webssh-bridge/ws
+go build -o ubyte-webssh-bridge .
 ```
 
-## Usage
+### Project Structure
 
-Start the server with the default settings using:
-
-```bash
-./ubyte-webssh-bridge
+```
+ubyte-webssh-bridge/
+├── README.md                 # This documentation
+├── LICENSE                   # MIT license
+├── Dockerfile               # Docker configuration
+├── frontend/                # Web interface [📖](frontend/README.md)
+├── nginx/                   # Reverse proxy config [📖](nginx/README.md)
+└── ws/                      # Go application source
+    ├── main.go              # Application entry point
+    ├── config/              # Configuration management [📖](ws/config/README.md)
+    ├── server/              # HTTP/WebSocket server [📖](ws/server/README.md)
+    ├── connection/          # Connection management [📖](ws/connection/README.md)
+    ├── message/             # Message processing [📖](ws/message/README.md)
+    ├── ssh/                 # SSH client [📖](ws/ssh/README.md)
+    └── utils/               # Utilities & rate limiting [📖](ws/utils/README.md)
 ```
 
-This will listen on `:8080` by default.
+**👉 For development setup:** [📖 Development Guide](ws/config/README.md#-testing-configuration)
 
-### Configuration Options
+## 🔧 Troubleshooting
 
-- **`-address`**: Use to specify a custom address and port (e.g., `-address=":8089"` for all interfaces on port 8089).
-- **`-debug`**: Enable debug mode for detailed logs (`-debug=true`).
+### Common Issues
 
-## Running with Docker
+- **Connection Refused**: Check SSH server accessibility and firewall rules
+- **Authentication Failed**: Verify credentials and SSH server settings
+- **Rate Limited**: Check IP whitelist or increase rate limits
+- **Certificate Errors**: Use valid certificates or add `-k` for testing
 
-`ubyte-webssh-bridge` is available as a Docker image and can be easily set up and run in a Docker container. This section guides you through pulling the Docker image, running a container with the necessary environment variables, and customizing the configuration as needed.
+**👉 For detailed troubleshooting:** [📖 Connection Troubleshooting](ws/connection/README.md#-troubleshooting)
 
-### Pulling the Docker Image
+## 🤝 Contributing
 
-First, pull the `ubyte-webssh-bridge` image from Docker Hub:
+We welcome contributions! Areas of interest:
 
-```bash
-docker pull ubyte/ubyte-webssh-bridge:latest
-```
+- **Security enhancements** and authentication methods
+- **Performance optimizations** and scalability improvements
+- **Protocol support** and WebSocket extensions
+- **Documentation** and examples
 
-### Starting the Container with Environment Variables
+### Getting Started
 
-To run `ubyte-webssh-bridge` properly, certain environment variables must be set to configure SSL certificates and the SSH connection. Use the `-e` flag with `docker run` to specify these variables:
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes with tests
+4. Submit a pull request
 
-```bash
-docker run -dit -p 8443:8443 \
-  -e COUNTRY="IT" \
-  -e STATE="Vicenza" \
-  -e CITY="Schio" \
-  -e ORGANIZATION="IBS s.r.l." \
-  -e ORGANIZATIONAL_UNIT="Network" \
-  -e COMMON_NAME="supia.it" \
-  -e HOST="10.12.0.236" \
-  -e PORT="22" \
-  ubyte/ubyte-webssh-bridge
-```
-
-This command starts the `ubyte-webssh-bridge` container in detached mode and sets up the environment with the required information for SSL and SSH configuration. The `-p` flag maps port 8443 of the container to port 8443 on the host, making the web interface accessible via `https://localhost:8443`.
-
-### Adjustments and Customization
-
-- **Port Mapping**: If you prefer to use a different port on the host, adjust the `-p` option accordingly (e.g., `-p 9443:8443` to use port 9443 on the host).
-
-By following these instructions, you can deploy `ubyte-webssh-bridge` in a Docker container with all necessary configurations for SSL and SSH connections tailored to your environment.
-
-## Contributing
-
-We warmly welcome contributions from the community! If you're looking to improve Ubyte WebSSH Bridge, here's how you can help:
-
-1. **Fork the Repository**: Start by forking the `ubyte-webssh-bridge` repository to your own GitHub account. This creates your own copy of the project where you can make changes.
-
-2. **Create a New Branch**: In your forked repository, create a new branch for your contribution. Name it after the feature you're adding or the issue you're fixing, e.g., `feature/new-auth-method` or `fix/connection-timeout`.
-
-3. **Commit Your Changes**: Make your changes in the new branch and commit them. Write clear, concise commit messages that explain your changes. This helps reviewers understand your intentions and the impact of your work.
-
-4. **Push Your Changes and Open a Pull Request**: Push your branch to your GitHub repository and then open a pull request against the `ubyte-webssh-bridge` main branch. In your pull request, describe what you've changed and why. If your changes address an existing issue, include a reference to it in the description.
-
-### Best Practices
-
-- **Adhere to Coding Standards**: Ensure your code follows the project's coding standards. This maintains the codebase's readability and consistency.
-
-- **Include Tests**: If your contribution adds new features or fixes bugs, include tests that cover these changes. Tests help ensure your changes work as expected and prevent future regressions.
-
-- **Documentation**: Update the README or any relevant documentation if your changes alter how users interact with the project or if you're introducing new features.
-
-By following these guidelines, you'll contribute to making Ubyte WebSSH Bridge even better. We look forward to your contributions!
-
-## Support
-
-If you encounter any issues or have questions, please file an issue on the GitHub issue tracker.
-
-## License
+## 📄 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## 🙏 Acknowledgments
+
+- **Go Team** - Excellent programming language
+- **Gorilla WebSocket** - High-performance WebSocket library
+- **xterm.js** - Modern terminal emulation
+- **Community** - Contributors and users
+
+---
+
+**⭐ Star this repository if you find it useful!**
+
+For questions, issues, or contributions, visit our [GitHub repository](https://github.com/ubyte-source/ubyte-webssh-bridge).
