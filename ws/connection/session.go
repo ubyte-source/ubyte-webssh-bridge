@@ -13,42 +13,37 @@ import (
 	"github.com/ubyte-source/ubyte-webssh-bridge/ssh"
 )
 
-// BridgeSession represents a WebSocket-SSH bridge session
+// BridgeSession represents a single, managed WebSocket-to-SSH connection.
+// It contains all necessary state for the session, including connections,
+// synchronization primitives, and metadata.
 type BridgeSession struct {
-	// Identification
 	ID            string
 	TargetAddress string
 	ClientIP      string
 
-	// Connections
 	WebSocketConn *websocket.Conn
 	SSHClient     *ssh.SSHClient
 	SSHSession    *ssh.SSHSession
 
-	// Message processing
 	MessageProcessor *message.MessageProcessor
 
-	// Context and synchronization
 	Context    context.Context
 	CancelFunc context.CancelFunc
 	WaitGroup  *sync.WaitGroup
 
-	// WebSocket write synchronization
 	WriteMutex sync.Mutex
 
-	// Connection state
 	IsActive     bool
 	IsClosed     bool
 	CloseMutex   sync.RWMutex
 	CreatedAt    time.Time
 	LastActivity time.Time
 
-	// Logger
 	Logger *logrus.Logger
 }
 
-// NewBridgeSession creates a new bridge session
-func NewBridgeSession(id string, webSocketConn *websocket.Conn, targetAddress string, clientIP string, logger *logrus.Logger) *BridgeSession {
+// NewBridgeSession creates and initializes a new BridgeSession.
+func NewBridgeSession(id string, webSocketConn *websocket.Conn, targetAddress, clientIP string, logger *logrus.Logger) *BridgeSession {
 	ctx, cancel := context.WithCancel(context.Background())
 	now := time.Now()
 
@@ -69,194 +64,187 @@ func NewBridgeSession(id string, webSocketConn *websocket.Conn, targetAddress st
 	}
 }
 
-// InitializeSSHConnection establishes the SSH connection for this session
-func (session *BridgeSession) InitializeSSHConnection(credentials message.Credentials, timeouts ssh.SSHTimeouts) error {
-	session.SSHClient = ssh.NewSSHClient(credentials, session.TargetAddress, timeouts, session.Logger)
+// InitializeSSHConnection establishes the underlying SSH connection for the session.
+func (s *BridgeSession) InitializeSSHConnection(credentials message.Credentials, timeouts ssh.SSHTimeouts) error {
+	s.SSHClient = ssh.NewSSHClient(credentials, s.TargetAddress, timeouts, s.Logger)
 
-	if err := session.SSHClient.Connect(session.Context, timeouts); err != nil {
+	if err := s.SSHClient.Connect(s.Context, timeouts); err != nil {
 		return fmt.Errorf("failed to connect SSH client: %v", err)
 	}
 
-	sshSession, err := session.SSHClient.NewSession()
+	sshSession, err := s.SSHClient.NewSession()
 	if err != nil {
-		if closeErr := session.SSHClient.Close(); closeErr != nil && session.Logger != nil {
-			session.Logger.Errorf("Failed to close SSH client after session creation error: %v", closeErr)
+		if closeErr := s.SSHClient.Close(); closeErr != nil {
+			s.Logger.Errorf("Failed to close SSH client after session creation error: %v", closeErr)
 		}
 		return fmt.Errorf("failed to create SSH session: %v", err)
 	}
 
-	session.SSHSession = sshSession
+	s.SSHSession = sshSession
 	return nil
 }
 
-// StartCommunication begins the bidirectional communication between WebSocket and SSH
-func (session *BridgeSession) StartCommunication() error {
-	if session.SSHSession == nil {
+// StartCommunication launches the goroutines that bridge communication between
+// the WebSocket and SSH connections.
+func (s *BridgeSession) StartCommunication() error {
+	if s.SSHSession == nil {
 		return fmt.Errorf("SSH session not initialized")
 	}
 
-	// Start communication goroutines
-	session.WaitGroup.Add(3)
-	go session.handleWebSocketMessages()
-	go session.handleSSHOutput()
-	go session.sendKeepAlive()
+	s.WaitGroup.Add(3)
+	go s.handleWebSocketMessages()
+	go s.handleSSHOutput()
+	go s.sendKeepAlive()
 
-	// Start SSH shell
-	if err := session.SSHSession.StartShell(); err != nil {
-		session.Logger.Errorf("Error starting SSH shell: %v", err)
+	if err := s.SSHSession.StartShell(); err != nil {
+		s.Logger.Errorf("Error starting SSH shell: %v", err)
 		return fmt.Errorf("failed to start SSH shell: %v", err)
 	}
 
-	session.IsActive = true
-	session.updateLastActivity()
-
-	if session.Logger != nil {
-		session.Logger.Infof("Bridge session %s started successfully", session.ID)
-	}
-
+	s.IsActive = true
+	s.updateLastActivity()
+	s.Logger.Infof("Bridge session %s started successfully", s.ID)
 	return nil
 }
 
-// handleWebSocketMessages processes incoming WebSocket messages
-func (session *BridgeSession) handleWebSocketMessages() {
-	defer session.WaitGroup.Done()
+// handleWebSocketMessages reads messages from the WebSocket and forwards them
+// to the appropriate handler.
+func (s *BridgeSession) handleWebSocketMessages() {
+	defer s.WaitGroup.Done()
 	defer func() {
-		if stdinPipe := session.SSHSession.GetStdinPipe(); stdinPipe != nil {
-			if err := stdinPipe.Close(); err != nil && session.Logger != nil {
-				session.Logger.Errorf("Failed to close stdin pipe: %v", err)
+		if stdinPipe := s.SSHSession.GetStdinPipe(); stdinPipe != nil {
+			if err := stdinPipe.Close(); err != nil {
+				s.Logger.Errorf("Failed to close stdin pipe: %v", err)
 			}
 		}
 	}()
 
 	for {
 		select {
-		case <-session.Context.Done():
+		case <-s.Context.Done():
 			return
 		default:
 		}
 
-		messageType, reader, err := session.readNextWebSocketFrame()
+		messageType, reader, err := s.readNextWebSocketFrame()
 		if err != nil {
-			if session.Logger != nil {
-				session.Logger.Errorf("WebSocket frame error: %v", err)
-			}
+			s.Logger.Errorf("WebSocket frame error: %v", err)
 			return
 		}
 
-		session.updateLastActivity()
+		s.updateLastActivity()
 
-		if err := session.processWebSocketMessage(messageType, reader); err != nil {
-			if session.Logger != nil {
-				session.Logger.Errorf("Message processing error: %v", err)
-			}
+		if err := s.processWebSocketMessage(messageType, reader); err != nil {
+			s.Logger.Errorf("Message processing error: %v", err)
 			return
 		}
 	}
 }
 
-// readNextWebSocketFrame reads the next WebSocket frame with context handling
-func (session *BridgeSession) readNextWebSocketFrame() (int, io.Reader, error) {
+// readNextWebSocketFrame safely reads the next message from the WebSocket,
+// respecting the session's context for cancellation.
+func (s *BridgeSession) readNextWebSocketFrame() (int, io.Reader, error) {
 	type result struct {
 		messageType int
 		reader      io.Reader
 		err         error
 	}
-
-	resultChannel := make(chan result, 1)
+	resultChan := make(chan result, 1)
+	done := make(chan struct{})
 
 	go func() {
-		messageType, reader, err := session.WebSocketConn.NextReader()
+		defer close(done)
+		msgType, r, err := s.WebSocketConn.NextReader()
 		select {
-		case resultChannel <- result{messageType, reader, err}:
-		case <-session.Context.Done():
-			if err := session.safeCloseWebSocket(); err != nil && session.Logger != nil {
-				session.Logger.Errorf("Failed to close WebSocket in readNextWebSocketFrame: %v", err)
+		case resultChan <- result{msgType, r, err}:
+		case <-s.Context.Done():
+			if err := s.safeCloseWebSocket(); err != nil {
+				s.Logger.Errorf("Failed to close WebSocket in readNextWebSocketFrame: %v", err)
 			}
 		}
 	}()
 
 	select {
-	case res := <-resultChannel:
+	case res := <-resultChan:
+		<-done
 		return res.messageType, res.reader, res.err
-	case <-session.Context.Done():
-		return 0, nil, session.Context.Err()
+	case <-s.Context.Done():
+		<-done
+		return 0, nil, s.Context.Err()
 	}
 }
 
-// processWebSocketMessage processes a WebSocket message based on its type
-func (session *BridgeSession) processWebSocketMessage(messageType int, reader io.Reader) error {
-	stdinWriter := session.SSHSession.GetStdinPipe()
-	sshSession := session.SSHSession.GetSession()
+// processWebSocketMessage dispatches a WebSocket message to the correct processor
+// based on its type (binary or text).
+func (s *BridgeSession) processWebSocketMessage(messageType int, reader io.Reader) error {
+	stdin := s.SSHSession.GetStdinPipe()
+	session := s.SSHSession.GetSession()
 
 	switch messageType {
-	case int(message.BinaryMessageType):
-		return session.MessageProcessor.ProcessBinaryMessage(reader, stdinWriter)
-	case int(message.TextMessageType):
-		return session.MessageProcessor.ProcessTextMessage(reader, stdinWriter, sshSession)
+	case websocket.BinaryMessage:
+		return s.MessageProcessor.ProcessBinaryMessage(reader, stdin)
+	case websocket.TextMessage:
+		return s.MessageProcessor.ProcessTextMessage(reader, stdin, session)
 	default:
-		// Ignore other message types
-		return nil
+		return nil // Ignore other message types
 	}
 }
 
-// handleSSHOutput reads SSH output and sends it to WebSocket
-func (session *BridgeSession) handleSSHOutput() {
-	defer session.WaitGroup.Done()
+// handleSSHOutput reads data from the SSH session's stdout and forwards it
+// to the WebSocket client.
+func (s *BridgeSession) handleSSHOutput() {
+	defer s.WaitGroup.Done()
 
-	stdoutPipe := session.SSHSession.GetStdoutPipe()
+	stdout := s.SSHSession.GetStdoutPipe()
 	buffer := make([]byte, 8192)
 
 	for {
 		select {
-		case <-session.Context.Done():
+		case <-s.Context.Done():
 			return
 		default:
 		}
 
-		n, err := stdoutPipe.Read(buffer)
+		n, err := stdout.Read(buffer)
 		if n > 0 {
-			if writeErr := session.safeWriteWebSocketMessage(int(message.BinaryMessageType), buffer[:n]); writeErr != nil {
-				if session.Logger != nil {
-					session.Logger.Errorf("Error writing SSH output to WebSocket: %v", writeErr)
-				}
-				if err := session.safeCloseWebSocket(); err != nil && session.Logger != nil {
-					session.Logger.Errorf("Failed to close WebSocket in handleSSHOutput: %v", err)
+			if writeErr := s.safeWriteWebSocketMessage(websocket.BinaryMessage, buffer[:n]); writeErr != nil {
+				s.Logger.Errorf("Error writing SSH output to WebSocket: %v", writeErr)
+				if closeErr := s.safeCloseWebSocket(); closeErr != nil {
+					s.Logger.Errorf("Failed to close WebSocket in handleSSHOutput: %v", closeErr)
 				}
 				return
 			}
-			session.updateLastActivity()
+			s.updateLastActivity()
 		}
 
 		if err != nil {
-			if err != io.EOF && session.Logger != nil {
-				session.Logger.Errorf("Error reading SSH stdout: %v", err)
+			if err != io.EOF {
+				s.Logger.Errorf("Error reading SSH stdout: %v", err)
 			}
-			if err := session.safeCloseWebSocket(); err != nil && session.Logger != nil {
-				session.Logger.Errorf("Failed to close WebSocket in handleSSHOutput on error: %v", err)
+			if closeErr := s.safeCloseWebSocket(); closeErr != nil {
+				s.Logger.Errorf("Failed to close WebSocket in handleSSHOutput on error: %v", closeErr)
 			}
 			return
 		}
 	}
 }
 
-// sendKeepAlive sends periodic ping messages to keep WebSocket alive
-func (session *BridgeSession) sendKeepAlive() {
-	defer session.WaitGroup.Done()
-
+// sendKeepAlive sends periodic ping messages to the client to keep the
+// WebSocket connection alive.
+func (s *BridgeSession) sendKeepAlive() {
+	defer s.WaitGroup.Done()
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-session.Context.Done():
+		case <-s.Context.Done():
 			return
 		case <-ticker.C:
-			if err := session.safeWriteWebSocketMessage(int(message.PingMessageType), nil); err != nil {
-				if session.Logger != nil {
-					session.Logger.Errorf("Error sending ping: %v", err)
-				}
-				if err := session.safeCloseWebSocket(); err != nil && session.Logger != nil {
-					session.Logger.Errorf("Failed to close WebSocket in sendKeepAlive: %v", err)
+			if err := s.safeWriteWebSocketMessage(websocket.PingMessage, nil); err != nil {
+				s.Logger.Errorf("Error sending ping: %v", err)
+				if closeErr := s.safeCloseWebSocket(); closeErr != nil {
+					s.Logger.Errorf("Failed to close WebSocket in sendKeepAlive: %v", closeErr)
 				}
 				return
 			}
@@ -264,100 +252,88 @@ func (session *BridgeSession) sendKeepAlive() {
 	}
 }
 
-// safeWriteWebSocketMessage writes a message to WebSocket with proper synchronization
-func (session *BridgeSession) safeWriteWebSocketMessage(messageType int, data []byte) error {
-	session.WriteMutex.Lock()
-	defer session.WriteMutex.Unlock()
-
-	session.CloseMutex.RLock()
-	if session.IsClosed {
-		session.CloseMutex.RUnlock()
+// safeWriteWebSocketMessage provides a thread-safe way to write messages
+// to the WebSocket connection.
+func (s *BridgeSession) safeWriteWebSocketMessage(messageType int, data []byte) error {
+	s.CloseMutex.RLock()
+	if s.IsClosed {
+		s.CloseMutex.RUnlock()
 		return fmt.Errorf("connection is closed")
 	}
-	session.CloseMutex.RUnlock()
 
-	return session.WebSocketConn.WriteMessage(messageType, data)
+	s.WriteMutex.Lock()
+	err := s.WebSocketConn.WriteMessage(messageType, data)
+	s.WriteMutex.Unlock()
+	s.CloseMutex.RUnlock()
+
+	return err
 }
 
-// safeCloseWebSocket closes the WebSocket connection safely
-func (session *BridgeSession) safeCloseWebSocket() error {
-	session.CloseMutex.Lock()
-	defer session.CloseMutex.Unlock()
-
-	if session.IsClosed {
+// safeCloseWebSocket provides a thread-safe way to close the WebSocket connection.
+func (s *BridgeSession) safeCloseWebSocket() error {
+	s.CloseMutex.Lock()
+	defer s.CloseMutex.Unlock()
+	if s.IsClosed {
 		return nil // Already closed
 	}
-
-	session.IsClosed = true
-	return session.WebSocketConn.Close()
+	s.IsClosed = true
+	return s.WebSocketConn.Close()
 }
 
-// updateLastActivity updates the last activity timestamp
-func (session *BridgeSession) updateLastActivity() {
-	session.LastActivity = time.Now()
+// updateLastActivity updates the timestamp of the last recorded activity.
+func (s *BridgeSession) updateLastActivity() {
+	s.LastActivity = time.Now()
 }
 
-// WaitForCompletion waits for the SSH session to complete
-func (session *BridgeSession) WaitForCompletion() error {
-	if session.SSHSession == nil {
+// WaitForCompletion blocks until the SSH session has terminated.
+func (s *BridgeSession) WaitForCompletion() error {
+	if s.SSHSession == nil {
 		return fmt.Errorf("SSH session not initialized")
 	}
-	return session.SSHSession.Wait()
+	return s.SSHSession.Wait()
 }
 
-// Close closes the bridge session and cleans up all resources
-func (session *BridgeSession) Close() error {
-	// Cancel context to stop all goroutines
-	if session.CancelFunc != nil {
-		session.CancelFunc()
+// Close terminates the session and releases all associated resources.
+func (s *BridgeSession) Close() error {
+	if s.CancelFunc != nil {
+		s.CancelFunc()
+	}
+	if s.WaitGroup != nil {
+		s.WaitGroup.Wait()
 	}
 
-	// Wait for all goroutines to finish
-	if session.WaitGroup != nil {
-		session.WaitGroup.Wait()
-	}
-
-	// Close SSH session
-	if session.SSHSession != nil {
-		if err := session.SSHSession.Close(); err != nil && session.Logger != nil {
-			session.Logger.Errorf("Failed to close SSH session: %v", err)
+	if s.SSHSession != nil {
+		if err := s.SSHSession.Close(); err != nil {
+			s.Logger.Errorf("Failed to close SSH session: %v", err)
 		}
 	}
-
-	// Close SSH client
-	if session.SSHClient != nil {
-		if err := session.SSHClient.Close(); err != nil && session.Logger != nil {
-			session.Logger.Errorf("Failed to close SSH client: %v", err)
+	if s.SSHClient != nil {
+		if err := s.SSHClient.Close(); err != nil {
+			s.Logger.Errorf("Failed to close SSH client: %v", err)
 		}
 	}
-
-	// Close WebSocket
-	if err := session.safeCloseWebSocket(); err != nil && session.Logger != nil {
-		session.Logger.Errorf("Failed to close WebSocket: %v", err)
+	if err := s.safeCloseWebSocket(); err != nil {
+		s.Logger.Errorf("Failed to close WebSocket: %v", err)
 	}
 
-	session.IsActive = false
-
-	if session.Logger != nil {
-		session.Logger.Infof("Bridge session %s closed", session.ID)
-	}
-
+	s.IsActive = false
+	s.Logger.Infof("Bridge session %s closed", s.ID)
 	return nil
 }
 
-// GetStats returns session statistics
-func (session *BridgeSession) GetStats() map[string]interface{} {
-	session.CloseMutex.RLock()
-	defer session.CloseMutex.RUnlock()
+// GetStats returns a map of the session's current statistics.
+func (s *BridgeSession) GetStats() map[string]interface{} {
+	s.CloseMutex.RLock()
+	defer s.CloseMutex.RUnlock()
 
 	return map[string]interface{}{
-		"id":             session.ID,
-		"target_address": session.TargetAddress,
-		"client_ip":      session.ClientIP,
-		"is_active":      session.IsActive,
-		"is_closed":      session.IsClosed,
-		"created_at":     session.CreatedAt,
-		"last_activity":  session.LastActivity,
-		"duration":       time.Since(session.CreatedAt).String(),
+		"id":             s.ID,
+		"target_address": s.TargetAddress,
+		"client_ip":      s.ClientIP,
+		"is_active":      s.IsActive,
+		"is_closed":      s.IsClosed,
+		"created_at":     s.CreatedAt,
+		"last_activity":  s.LastActivity,
+		"duration":       time.Since(s.CreatedAt).String(),
 	}
 }

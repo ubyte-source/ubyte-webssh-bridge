@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// RateLimiter manages connection rate limiting
+// RateLimiter provides a simple, token bucket-based rate limiting mechanism.
 type RateLimiter struct {
 	interval        time.Duration
 	burst           int
@@ -18,129 +18,106 @@ type RateLimiter struct {
 	stopCleanup     chan struct{}
 }
 
-// NewRateLimiter creates a new rate limiter instance
+// NewRateLimiter creates and starts a new RateLimiter.
 func NewRateLimiter(interval time.Duration, burst int, perIP bool, whitelist []string) *RateLimiter {
-	whitelistMap := make(map[string]bool)
+	wlMap := make(map[string]bool)
 	for _, ip := range whitelist {
-		whitelistMap[ip] = true
+		wlMap[ip] = true
 	}
 
-	rateLimiter := &RateLimiter{
+	limiter := &RateLimiter{
 		interval:        interval,
 		burst:           burst,
 		perIP:           perIP,
-		whitelist:       whitelistMap,
+		whitelist:       wlMap,
 		lastAttempts:    make(map[string]time.Time),
 		attemptCounts:   make(map[string]int),
 		cleanupInterval: interval * 2,
 		stopCleanup:     make(chan struct{}),
 	}
-
-	// Start cleanup goroutine
-	go rateLimiter.cleanupExpiredEntries()
-
-	return rateLimiter
+	go limiter.cleanupExpiredEntries()
+	return limiter
 }
 
-// IsAllowed checks if a request from the given identifier is allowed
-func (rateLimiter *RateLimiter) IsAllowed(identifier string) bool {
-	// Check whitelist first
-	if rateLimiter.whitelist[identifier] {
+// IsAllowed determines if a request from a given identifier should be allowed
+// based on the rate limiting rules.
+func (rl *RateLimiter) IsAllowed(identifier string) bool {
+	if rl.whitelist[identifier] {
 		return true
 	}
 
-	rateLimiter.mutex.Lock()
-	defer rateLimiter.mutex.Unlock()
+	rl.mutex.Lock()
+	defer rl.mutex.Unlock()
 
 	now := time.Now()
-	lastAttempt, exists := rateLimiter.lastAttempts[identifier]
+	last, exists := rl.lastAttempts[identifier]
 
-	if !exists {
-		// First attempt
-		rateLimiter.lastAttempts[identifier] = now
-		rateLimiter.attemptCounts[identifier] = 1
+	if !exists || now.Sub(last) > rl.interval {
+		rl.lastAttempts[identifier] = now
+		rl.attemptCounts[identifier] = 1
 		return true
 	}
 
-	// Check if interval has passed
-	if now.Sub(lastAttempt) > rateLimiter.interval {
-		// Reset counter after interval
-		rateLimiter.lastAttempts[identifier] = now
-		rateLimiter.attemptCounts[identifier] = 1
+	if rl.attemptCounts[identifier] < rl.burst {
+		rl.attemptCounts[identifier]++
 		return true
 	}
 
-	// Within interval, check burst limit
-	currentCount := rateLimiter.attemptCounts[identifier]
-	if currentCount < rateLimiter.burst {
-		rateLimiter.attemptCounts[identifier]++
-		return true
-	}
-
-	// Rate limit exceeded
 	return false
 }
 
-// RecordAttempt records an attempt for the given identifier
-func (rateLimiter *RateLimiter) RecordAttempt(identifier string) {
-	if rateLimiter.whitelist[identifier] {
+// RecordAttempt manually records a connection attempt for a given identifier.
+func (rl *RateLimiter) RecordAttempt(identifier string) {
+	if rl.whitelist[identifier] {
 		return
 	}
 
-	rateLimiter.mutex.Lock()
-	defer rateLimiter.mutex.Unlock()
+	rl.mutex.Lock()
+	defer rl.mutex.Unlock()
 
-	now := time.Now()
-	rateLimiter.lastAttempts[identifier] = now
-
-	if count, exists := rateLimiter.attemptCounts[identifier]; exists {
-		rateLimiter.attemptCounts[identifier] = count + 1
-	} else {
-		rateLimiter.attemptCounts[identifier] = 1
-	}
+	rl.lastAttempts[identifier] = time.Now()
+	rl.attemptCounts[identifier]++
 }
 
-// cleanupExpiredEntries removes old entries to prevent memory leaks
-func (rateLimiter *RateLimiter) cleanupExpiredEntries() {
-	ticker := time.NewTicker(rateLimiter.cleanupInterval)
+// cleanupExpiredEntries is a background task that periodically removes old
+// entries from the rate limiter to prevent memory growth.
+func (rl *RateLimiter) cleanupExpiredEntries() {
+	ticker := time.NewTicker(rl.cleanupInterval)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ticker.C:
-			rateLimiter.mutex.Lock()
-			now := time.Now()
-			cutoff := now.Add(-rateLimiter.interval * 2)
-
-			for identifier, lastAttempt := range rateLimiter.lastAttempts {
-				if lastAttempt.Before(cutoff) {
-					delete(rateLimiter.lastAttempts, identifier)
-					delete(rateLimiter.attemptCounts, identifier)
+			rl.mutex.Lock()
+			cutoff := time.Now().Add(-rl.interval * 2)
+			for id, last := range rl.lastAttempts {
+				if last.Before(cutoff) {
+					delete(rl.lastAttempts, id)
+					delete(rl.attemptCounts, id)
 				}
 			}
-			rateLimiter.mutex.Unlock()
-
-		case <-rateLimiter.stopCleanup:
+			rl.mutex.Unlock()
+		case <-rl.stopCleanup:
 			return
 		}
 	}
 }
 
-// Close stops the rate limiter and cleans up resources
-func (rateLimiter *RateLimiter) Close() {
-	close(rateLimiter.stopCleanup)
+// Close stops the background cleanup goroutine.
+func (rl *RateLimiter) Close() {
+	close(rl.stopCleanup)
 }
 
-// GetStats returns current rate limiter statistics
-func (rateLimiter *RateLimiter) GetStats() map[string]interface{} {
-	rateLimiter.mutex.RLock()
-	defer rateLimiter.mutex.RUnlock()
+// GetStats returns a map of the rate limiter's current statistics.
+func (rl *RateLimiter) GetStats() map[string]interface{} {
+	rl.mutex.RLock()
+	defer rl.mutex.RUnlock()
 
 	return map[string]interface{}{
-		"active_limiters": len(rateLimiter.lastAttempts),
-		"interval":        rateLimiter.interval.String(),
-		"burst":           rateLimiter.burst,
-		"per_ip":          rateLimiter.perIP,
-		"whitelist_size":  len(rateLimiter.whitelist),
+		"active_limiters": len(rl.lastAttempts),
+		"interval":        rl.interval.String(),
+		"burst":           rl.burst,
+		"per_ip":          rl.perIP,
+		"whitelist_size":  len(rl.whitelist),
 	}
 }

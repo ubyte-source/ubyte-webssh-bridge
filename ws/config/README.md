@@ -48,6 +48,7 @@ ListenAddress   string // Server bind address (default: ":8080")
 CertificateFile string // TLS certificate path (default: "/data/certificate.crt")
 KeyFile         string // TLS private key path (default: "/data/certificate.key")
 DebugMode       bool   // Enable debug logging (default: false)
+ShutdownTimeout time.Duration // Graceful shutdown timeout (default: 30s)
 ```
 
 ### Connection Limits
@@ -144,6 +145,7 @@ cfg := &config.Configuration{
     HealthCheckPath:           "/health",
     EnableMetrics:             true,
     MetricsPath:               "/metrics",
+    ShutdownTimeout:           60 * time.Second,
 }
 ```
 
@@ -260,6 +262,7 @@ cfg := &config.Configuration{
     RateLimitPerIP:            true,
     EnableHealthCheck:         true,
     EnableMetrics:             true,
+    ShutdownTimeout:           10 * time.Second,
 }
 ```
 
@@ -269,34 +272,43 @@ The `Validate()` method ensures configuration integrity:
 
 ```go
 func (c *Configuration) Validate() error {
-    // Address validation
-    if c.ListenAddress == "" {
-        return fmt.Errorf("listen address cannot be empty")
-    }
-
-    // Connection limits validation
-    if c.MaxConnections <= 0 {
-        return fmt.Errorf("max connections must be positive")
-    }
-
-    if c.MaxConnectionsPerHost <= 0 {
-        return fmt.Errorf("max connections per host must be positive")
-    }
-
-    // Timeout validation
-    if c.SSHConnectTimeout <= 0 {
-        return fmt.Errorf("SSH connect timeout must be positive")
-    }
-
-    if c.SSHAuthTimeout <= 0 {
-        return fmt.Errorf("SSH auth timeout must be positive")
-    }
-
-    if c.SSHHandshakeTimeout <= 0 {
-        return fmt.Errorf("SSH handshake timeout must be positive")
-    }
-
-    return nil
+	if c.ListenAddress == "" {
+		return fmt.Errorf("listen address cannot be empty")
+	}
+	if c.MaxConnections <= 0 {
+		return fmt.Errorf("max connections must be positive")
+	}
+	if c.MaxConnectionsPerHost <= 0 {
+		return fmt.Errorf("max connections per host must be positive")
+	}
+	if c.ConnectionTimeout <= 0 {
+		return fmt.Errorf("connection timeout must be positive")
+	}
+	if c.SSHConnectTimeout <= 0 {
+		return fmt.Errorf("SSH connect timeout must be positive")
+	}
+	if c.SSHAuthTimeout <= 0 {
+		return fmt.Errorf("SSH auth timeout must be positive")
+	}
+	if c.SSHHandshakeTimeout <= 0 {
+		return fmt.Errorf("SSH handshake timeout must be positive")
+	}
+	if c.WebSocketHandshakeTimeout <= 0 {
+		return fmt.Errorf("websocket handshake timeout must be positive")
+	}
+	if c.WebSocketReadLimit <= 0 {
+		return fmt.Errorf("websocket read limit must be positive")
+	}
+	if c.RateLimitInterval <= 0 {
+		return fmt.Errorf("rate limit interval must be positive")
+	}
+	if c.RateLimitBurst <= 0 {
+		return fmt.Errorf("rate limit burst must be positive")
+	}
+	if c.ShutdownTimeout <= 0 {
+		return fmt.Errorf("shutdown timeout must be positive")
+	}
+	return nil
 }
 ```
 

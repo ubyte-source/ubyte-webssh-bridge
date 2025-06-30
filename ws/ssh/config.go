@@ -5,17 +5,17 @@ import (
 	"time"
 )
 
-// SSHTimeouts holds various timeout configurations for SSH connections
+// SSHTimeouts encapsulates the various timeout settings for an SSH connection.
 type SSHTimeouts struct {
-	// ConnectTimeout defines the timeout for establishing TCP connection to SSH server
+	// ConnectTimeout is the maximum time to wait for the TCP connection to be established.
 	ConnectTimeout time.Duration
-	// AuthTimeout defines the timeout for SSH authentication (including RADIUS)
+	// AuthTimeout is the maximum time to wait for the SSH authentication to complete.
 	AuthTimeout time.Duration
-	// HandshakeTimeout defines the total timeout for SSH handshake
+	// HandshakeTimeout is the maximum time for the entire SSH handshake process.
 	HandshakeTimeout time.Duration
 }
 
-// DefaultSSHTimeouts returns default SSH timeout values optimized for RADIUS authentication
+// DefaultSSHTimeouts provides a set of standard, sensible timeouts for SSH connections.
 func DefaultSSHTimeouts() SSHTimeouts {
 	return SSHTimeouts{
 		ConnectTimeout:   10 * time.Second,
@@ -24,28 +24,28 @@ func DefaultSSHTimeouts() SSHTimeouts {
 	}
 }
 
-// NewSSHTimeouts creates SSH timeouts from individual duration values
-func NewSSHTimeouts(connectTimeout, authTimeout, handshakeTimeout time.Duration) SSHTimeouts {
+// NewSSHTimeouts creates a new SSHTimeouts struct from the provided duration values.
+func NewSSHTimeouts(connect, auth, handshake time.Duration) SSHTimeouts {
 	return SSHTimeouts{
-		ConnectTimeout:   connectTimeout,
-		AuthTimeout:      authTimeout,
-		HandshakeTimeout: handshakeTimeout,
+		ConnectTimeout:   connect,
+		AuthTimeout:      auth,
+		HandshakeTimeout: handshake,
 	}
 }
 
-// Validate checks if the timeout values are reasonable
-func (timeouts SSHTimeouts) Validate() error {
-	if timeouts.ConnectTimeout <= 0 {
+// Validate checks that the timeout values are valid and logically consistent.
+func (t SSHTimeouts) Validate() error {
+	if t.ConnectTimeout <= 0 {
 		return fmt.Errorf("connect timeout must be positive")
 	}
-	if timeouts.AuthTimeout <= 0 {
+	if t.AuthTimeout <= 0 {
 		return fmt.Errorf("auth timeout must be positive")
 	}
-	if timeouts.HandshakeTimeout <= 0 {
+	if t.HandshakeTimeout <= 0 {
 		return fmt.Errorf("handshake timeout must be positive")
 	}
-	if timeouts.HandshakeTimeout < timeouts.AuthTimeout {
-		return fmt.Errorf("handshake timeout should be greater than or equal to auth timeout")
+	if t.HandshakeTimeout < t.AuthTimeout {
+		return fmt.Errorf("handshake timeout must be greater than or equal to auth timeout")
 	}
 	return nil
 }

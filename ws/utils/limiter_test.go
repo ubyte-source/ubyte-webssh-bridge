@@ -8,7 +8,9 @@ import (
 func TestRateLimiterBasic(t *testing.T) {
 	rl := NewRateLimiter(100*time.Millisecond, 2, true, nil)
 	id := "1.2.3.4"
-	if !rl.IsAllowed(id) || !rl.IsAllowed(id) {
+	first := rl.IsAllowed(id)
+	second := rl.IsAllowed(id)
+	if !first || !second {
 		t.Fatal("first two attempts should be allowed")
 	}
 	if rl.IsAllowed(id) {

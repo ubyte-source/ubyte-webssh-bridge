@@ -98,21 +98,21 @@ docker run -d --name webssh-bridge -p 8443:8443 \
 
 ### 🔧 Core Components
 
-| Component              | Description                                             | Documentation                                |
-| ---------------------- | ------------------------------------------------------- | -------------------------------------------- |
-| **Server**             | HTTP/WebSocket server, TLS termination, request routing | [📖 ws/server/](ws/server/README.md)         |
-| **Configuration**      | System configuration, validation, environment variables | [📖 ws/config/](ws/config/README.md)         |
-| **Connection Manager** | Session lifecycle, connection limits, resource cleanup  | [📖 ws/connection/](ws/connection/README.md) |
-| **SSH Client**         | SSH connections, timeouts, RADIUS support               | [📖 ws/ssh/](ws/ssh/README.md)               |
-| **Message Processing** | WebSocket messages, protocol handling, action dispatch  | [📖 ws/message/](ws/message/README.md)       |
-| **Rate Limiting**      | IP-based rate limiting, whitelist management            | [📖 ws/utils/](ws/utils/README.md)           |
+| Component              | Description                                             | Documentation                       |
+| ---------------------- | ------------------------------------------------------- | ----------------------------------- |
+| **Server**             | HTTP/WebSocket server, TLS termination, request routing | [📖 ws/server/](ws/server/)         |
+| **Configuration**      | System configuration, validation, environment variables | [📖 ws/config/](ws/config/)         |
+| **Connection Manager** | Session lifecycle, connection limits, resource cleanup  | [📖 ws/connection/](ws/connection/) |
+| **SSH Client**         | SSH connections, timeouts, RADIUS support               | [📖 ws/ssh/](ws/ssh/)               |
+| **Message Processing** | WebSocket messages, protocol handling, action dispatch  | [📖 ws/message/](ws/message/)       |
+| **Rate Limiting**      | IP-based rate limiting, whitelist management            | [📖 ws/utils/](ws/utils/)           |
 
 ### 🌐 Frontend & Integration
 
-| Component               | Description                                | Documentation                      |
-| ----------------------- | ------------------------------------------ | ---------------------------------- |
-| **Web Interface**       | HTML/CSS/JS frontend, xterm.js integration | [📖 frontend/](frontend/README.md) |
-| **Nginx Configuration** | Reverse proxy setup, load balancing        | [📖 nginx/](nginx/README.md)       |
+| Component               | Description                                | Documentation             |
+| ----------------------- | ------------------------------------------ | ------------------------- |
+| **Web Interface**       | HTML/CSS/JS frontend, xterm.js integration | [📖 frontend/](frontend/) |
+| **Nginx Configuration** | Reverse proxy setup, load balancing        | [📖 nginx/](nginx/)       |
 
 ## ⚙️ Configuration
 
@@ -120,16 +120,76 @@ docker run -d --name webssh-bridge -p 8443:8443 \
 
 ```bash
 ./ubyte-webssh-bridge \
-  -address=":8443" \
-  -cert="/path/to/cert.pem" \
-  -key="/path/to/key.pem" \
-  -debug=false
+  -server-address=":8443" \
+  -server-cert="/path/to/cert.pem" \
+  -server-key="/path/to/key.pem" \
+  -server-debug=true \
+  -conn-max-total=2000 \
+  -conn-max-per-host=20 \
+  -conn-timeout="60s" \
+  -ssh-connect-timeout="15s" \
+  -ssh-auth-timeout="60s" \
+  -ssh-handshake-timeout="90s" \
+  -ws-read-buffer=16384 \
+  -ws-write-buffer=16384 \
+  -ws-handshake-timeout="45s" \
+  -ws-read-limit=1048576 \
+  -rate-interval="5s" \
+  -rate-burst=20 \
+  -rate-per-ip=true \
+  -rate-whitelist="127.0.0.1,10.0.0.1" \
+  -server-shutdown-timeout="30s" \
+  -health-enabled=true \
+  -health-path="/health" \
+  -metrics-enabled=true \
+  -metrics-path="/metrics"
 ```
 
-### Environment Variables (Docker)
+### Environment Variables
+
+#### 🔧 Configuration by Category (UWSB\_ Prefixed)
 
 ```bash
-# Certificate generation
+# 🔌 Connection Settings
+UWSB_CONN_TIMEOUT="60s"                            # Connection timeout
+UWSB_CONN_MAX_TOTAL=2000                           # Maximum total connections
+UWSB_CONN_MAX_PER_HOST=20                          # Maximum connections per host
+
+# 🏥 Health & Metrics Monitoring
+UWSB_HEALTH_ENABLED=true                           # Enable health check endpoint
+UWSB_HEALTH_PATH="/health"                         # Health check endpoint path
+UWSB_METRICS_ENABLED=true                          # Enable metrics endpoint
+UWSB_METRICS_PATH="/metrics"                       # Metrics endpoint path
+
+# ⏱️ Rate Limiting
+UWSB_RATE_BURST=20                                 # Rate limit burst size
+UWSB_RATE_INTERVAL="5s"                            # Rate limit interval
+UWSB_RATE_PER_IP=true                              # Enable per-IP rate limiting
+UWSB_RATE_WHITELIST="127.0.0.1,10.0.0.1"          # Comma-separated IP whitelist
+
+# 🖥️ Server Settings
+UWSB_SERVER_ADDRESS=":8443"                        # Server listen address
+UWSB_SERVER_CERT_FILE="/path/to/certificate.crt"  # TLS certificate path
+UWSB_SERVER_DEBUG=true                             # Enable debug logging
+UWSB_SERVER_KEY_FILE="/path/to/private.key"       # TLS private key path
+UWSB_SERVER_SHUTDOWN_TIMEOUT="30s"                 # Graceful shutdown timeout
+
+# 🔐 SSH Settings
+UWSB_SSH_AUTH_TIMEOUT="60s"                        # SSH authentication timeout (RADIUS)
+UWSB_SSH_CONNECT_TIMEOUT="15s"                     # SSH connection timeout
+UWSB_SSH_HANDSHAKE_TIMEOUT="90s"                   # SSH handshake timeout
+
+# 🌐 WebSocket Settings
+UWSB_WS_HANDSHAKE_TIMEOUT="45s"                    # WebSocket handshake timeout
+UWSB_WS_READ_BUFFER=16384                          # WebSocket read buffer size
+UWSB_WS_READ_LIMIT=1048576                         # WebSocket read limit (bytes)
+UWSB_WS_WRITE_BUFFER=16384                         # WebSocket write buffer size
+```
+
+#### 🐳 Docker Certificate Generation
+
+```bash
+# Certificate generation (Docker only)
 COUNTRY="US"
 STATE="California"
 CITY="San Francisco"
@@ -141,7 +201,7 @@ HOST="192.168.1.100"
 PORT="22"
 ```
 
-**👉 For complete configuration options:** [📖 Configuration Guide](ws/config/README.md)
+**👉 For complete configuration options:** [📖 Configuration Guide](ws/config/)
 
 ## 🔌 API Reference
 
@@ -156,7 +216,7 @@ wss://{server}:{port}/ws/{ssh_host}/{ssh_port}
 - `GET /health` - Health check and status
 - `GET /metrics` - Performance metrics and statistics
 
-**👉 For complete API documentation:** [📖 Server Documentation](ws/server/README.md)
+**👉 For complete API documentation:** [📖 Server Documentation](ws/server/)
 
 ## 🐳 Deployment
 
@@ -193,13 +253,14 @@ services:
 
 ## 🔒 Security Features
 
-- **🔐 TLS Encryption**: Mandatory HTTPS/WSS connections
-- **⏱️ Rate Limiting**: Configurable per-IP with whitelist support
-- **📊 Connection Limits**: Global and per-host restrictions
-- **🛡️ Input Validation**: Comprehensive message validation
-- **📝 Audit Logging**: Structured logging with detailed events
+- **🔐 TLS Encryption**: Mandatory HTTPS/WSS connections with strong, modern cipher suites.
+- **🛡️ Dynamic Origin Check**: Automatic Cross-Site WebSocket Hijacking (CSWH) protection by validating the client's `Origin` header against the server's `Host` header.
+- **⏱️ Rate Limiting**: Configurable per-IP with whitelist support.
+- **📊 Connection Limits**: Global and per-host restrictions.
+- **🛡️ Input Validation**: Comprehensive message validation.
+- **📝 Audit Logging**: Structured logging with detailed events.
 
-**👉 For security best practices:** [📖 Security Documentation](ws/server/README.md#-security-features)
+**👉 For security best practices:** [📖 Security Documentation](ws/server/#-security-features)
 
 ## 📊 Monitoring
 
@@ -215,7 +276,7 @@ curl -k https://localhost:8443/health
 curl -k https://localhost:8443/metrics
 ```
 
-**👉 For monitoring setup:** [📖 Server Monitoring](ws/server/README.md#-monitoring-endpoints)
+**👉 For monitoring setup:** [📖 Server Monitoring](ws/server/#-monitoring-endpoints)
 
 ## 🛠️ Development
 
@@ -234,19 +295,19 @@ ubyte-webssh-bridge/
 ├── README.md                 # This documentation
 ├── LICENSE                   # MIT license
 ├── Dockerfile               # Docker configuration
-├── frontend/                # Web interface [📖](frontend/README.md)
-├── nginx/                   # Reverse proxy config [📖](nginx/README.md)
+├── frontend/                # Web interface [📖](frontend/)
+├── nginx/                   # Reverse proxy config [📖](nginx/)
 └── ws/                      # Go application source
     ├── main.go              # Application entry point
-    ├── config/              # Configuration management [📖](ws/config/README.md)
-    ├── server/              # HTTP/WebSocket server [📖](ws/server/README.md)
-    ├── connection/          # Connection management [📖](ws/connection/README.md)
-    ├── message/             # Message processing [📖](ws/message/README.md)
-    ├── ssh/                 # SSH client [📖](ws/ssh/README.md)
-    └── utils/               # Utilities & rate limiting [📖](ws/utils/README.md)
+    ├── config/              # Configuration management [📖](ws/config/)
+    ├── server/              # HTTP/WebSocket server [📖](ws/server/)
+    ├── connection/          # Connection management [📖](ws/connection/)
+    ├── message/             # Message processing [📖](ws/message/)
+    ├── ssh/                 # SSH client [📖](ws/ssh/)
+    └── utils/               # Utilities & rate limiting [📖](ws/utils/)
 ```
 
-**👉 For development setup:** [📖 Development Guide](ws/config/README.md#-testing-configuration)
+**👉 For development setup:** [📖 Development Guide](ws/config/#-testing-configuration)
 
 ## 🔧 Troubleshooting
 
@@ -257,7 +318,7 @@ ubyte-webssh-bridge/
 - **Rate Limited**: Check IP whitelist or increase rate limits
 - **Certificate Errors**: Use valid certificates or add `-k` for testing
 
-**👉 For detailed troubleshooting:** [📖 Connection Troubleshooting](ws/connection/README.md#-troubleshooting)
+**👉 For detailed troubleshooting:** [📖 Connection Troubleshooting](ws/connection/#-troubleshooting)
 
 ## 🤝 Contributing
 

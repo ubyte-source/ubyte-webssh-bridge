@@ -67,7 +67,7 @@ upgrader := websocket.Upgrader{
     ReadBufferSize:   cfg.WebSocketReadBufferSize,   // Default: 8KB
     WriteBufferSize:  cfg.WebSocketWriteBufferSize,  // Default: 8KB
     HandshakeTimeout: cfg.WebSocketHandshakeTimeout, // Default: 30s
-    CheckOrigin:      func(r *http.Request) bool { return true },
+    CheckOrigin:      server.checkOrigin,
 }
 ```
 
@@ -176,7 +176,7 @@ func (bridge *WebSSHBridge) Run() error {
 ```go
 func (bridge *WebSSHBridge) Stop() error {
     // Create shutdown context with timeout
-    ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+    ctx, cancel := context.WithTimeout(context.Background(), bridge.config.ShutdownTimeout)
     defer cancel()
 
     // Shutdown HTTP server
@@ -238,7 +238,7 @@ func (bridge *WebSSHBridge) handleMetrics(w http.ResponseWriter, r *http.Request
 
     metrics := map[string]interface{}{
         "connections":  connectionStats,
-        "limiter": rateLimiterStats,
+        "limiter":      rateLimiterStats,
         "timestamp":    time.Now().UTC(),
     }
 
@@ -251,15 +251,40 @@ func (bridge *WebSSHBridge) handleMetrics(w http.ResponseWriter, r *http.Request
 
 ### TLS Configuration
 
-The server requires TLS for all connections:
+The server requires TLS for all connections and uses a secure-by-default configuration:
 
 ```go
+bridge.httpServer = &http.Server{
+    Addr:      bridge.config.ListenAddress,
+    Handler:   mux,
+    TLSConfig: config.SecureTLSConfig(),
+}
+
 // Start server with TLS
 if err := bridge.httpServer.ListenAndServeTLS(
     bridge.config.CertificateFile,
     bridge.config.KeyFile,
 ); err != nil && err != http.ErrServerClosed {
     return fmt.Errorf("server failed to start: %v", err)
+}
+```
+
+### Dynamic Origin Check
+
+The server provides automatic Cross-Site WebSocket Hijacking (CSWH) protection by validating the `Origin` header against the `Host` header:
+
+```go
+func (bridge *WebSSHBridge) checkOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true // Allow non-browser clients
+	}
+	host := r.Host
+	if origin != "https://"+host && origin != "http://"+host {
+		bridge.logger.Warnf("WebSocket connection from untrusted origin %s blocked (host: %s)", origin, host)
+		return false
+	}
+	return true
 }
 ```
 

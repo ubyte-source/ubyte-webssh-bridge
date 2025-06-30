@@ -17,28 +17,28 @@ import (
 	"github.com/ubyte-source/ubyte-webssh-bridge/ssh"
 )
 
-// ConnectionManager manages all active WebSocket-SSH bridge connections
+// ConnectionManager handles the lifecycle of all WebSocket-SSH sessions,
+// including creation, tracking, and cleanup. It enforces connection limits
+// and collects statistics.
 type ConnectionManager struct {
-	// Configuration
 	config *config.Configuration
 	logger *logrus.Logger
 
-	// Session management
 	activeSessions map[string]*BridgeSession
 	sessionsMutex  sync.RWMutex
 
-	// Host connection tracking
 	hostConnections map[string]int
 	hostMutex       sync.RWMutex
 
-	// Statistics
 	totalSessions      int64
 	successfulSessions int64
 	failedSessions     int64
 	statsMutex         sync.RWMutex
 }
 
-// NewConnectionManager creates a new connection manager
+// NewConnectionManager creates and returns a new ConnectionManager instance.
+// It initializes the session and host tracking maps and starts a background
+// routine to clean up inactive sessions.
 func NewConnectionManager(config *config.Configuration, logger *logrus.Logger) *ConnectionManager {
 	manager := &ConnectionManager{
 		config:          config,
@@ -46,83 +46,66 @@ func NewConnectionManager(config *config.Configuration, logger *logrus.Logger) *
 		activeSessions:  make(map[string]*BridgeSession),
 		hostConnections: make(map[string]int),
 	}
-
-	// Start cleanup routine
 	go manager.startCleanupRoutine()
-
 	return manager
 }
 
-// CreateSession creates a new bridge session
-func (manager *ConnectionManager) CreateSession(webSocketConn *websocket.Conn, targetAddress string, clientIP string) (*BridgeSession, error) {
-	// Check global connection limit
+// CreateSession establishes a new bridge session after validating connection limits.
+// It generates a unique ID for the session, configures the WebSocket connection,
+// and adds the session to the active pool.
+func (manager *ConnectionManager) CreateSession(webSocketConn *websocket.Conn, targetAddress, clientIP string) (*BridgeSession, error) {
 	if err := manager.checkGlobalConnectionLimit(); err != nil {
 		return nil, err
 	}
-
-	// Check per-host connection limit
 	if err := manager.checkHostConnectionLimit(targetAddress); err != nil {
 		return nil, err
 	}
 
-	// Generate unique session ID
 	sessionID, err := manager.generateSessionID()
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate session ID: %v", err)
 	}
 
-	// Create new session
 	session := NewBridgeSession(sessionID, webSocketConn, targetAddress, clientIP, manager.logger)
-
-	// Configure WebSocket
 	if err := manager.configureWebSocket(webSocketConn); err != nil {
 		return nil, fmt.Errorf("failed to configure WebSocket: %v", err)
 	}
 
-	// Add to active sessions
 	manager.sessionsMutex.Lock()
 	manager.activeSessions[sessionID] = session
 	manager.sessionsMutex.Unlock()
 
-	// Update host connection count
 	manager.hostMutex.Lock()
 	manager.hostConnections[targetAddress]++
 	manager.hostMutex.Unlock()
 
-	// Update statistics
 	manager.statsMutex.Lock()
 	manager.totalSessions++
 	manager.statsMutex.Unlock()
 
-	if manager.logger != nil {
-		manager.logger.Infof("Created new session %s for %s -> %s", sessionID, clientIP, targetAddress)
-	}
-
+	manager.logger.Infof("Created new session %s for %s -> %s", sessionID, clientIP, targetAddress)
 	return session, nil
 }
 
-// InitializeSession initializes a session with SSH connection
+// InitializeSession completes the session setup by establishing the SSH connection
+// and starting the bidirectional communication bridge.
 func (manager *ConnectionManager) InitializeSession(session *BridgeSession, credentials message.Credentials) error {
-	// Create SSH timeouts from configuration
 	timeouts := ssh.NewSSHTimeouts(
 		manager.config.SSHConnectTimeout,
 		manager.config.SSHAuthTimeout,
 		manager.config.SSHHandshakeTimeout,
 	)
 
-	// Initialize SSH connection
 	if err := session.InitializeSSHConnection(credentials, timeouts); err != nil {
 		manager.handleSessionFailure(session, err)
 		return fmt.Errorf("failed to initialize SSH connection: %v", err)
 	}
 
-	// Start communication
 	if err := session.StartCommunication(); err != nil {
 		manager.handleSessionFailure(session, err)
 		return fmt.Errorf("failed to start communication: %v", err)
 	}
 
-	// Update statistics
 	manager.statsMutex.Lock()
 	manager.successfulSessions++
 	manager.statsMutex.Unlock()
@@ -130,7 +113,8 @@ func (manager *ConnectionManager) InitializeSession(session *BridgeSession, cred
 	return nil
 }
 
-// RemoveSession removes a session from the manager
+// RemoveSession terminates a session and removes it from the active pool.
+// It updates connection counts and ensures all resources are released.
 func (manager *ConnectionManager) RemoveSession(sessionID string) error {
 	manager.sessionsMutex.Lock()
 	session, exists := manager.activeSessions[sessionID]
@@ -143,9 +127,8 @@ func (manager *ConnectionManager) RemoveSession(sessionID string) error {
 		return fmt.Errorf("session %s not found", sessionID)
 	}
 
-	// Update host connection count
 	manager.hostMutex.Lock()
-	if count := manager.hostConnections[session.TargetAddress]; count > 0 {
+	if count, ok := manager.hostConnections[session.TargetAddress]; ok && count > 0 {
 		manager.hostConnections[session.TargetAddress]--
 		if manager.hostConnections[session.TargetAddress] == 0 {
 			delete(manager.hostConnections, session.TargetAddress)
@@ -153,31 +136,26 @@ func (manager *ConnectionManager) RemoveSession(sessionID string) error {
 	}
 	manager.hostMutex.Unlock()
 
-	// Close the session
-	if err := session.Close(); err != nil && manager.logger != nil {
+	if err := session.Close(); err != nil {
 		manager.logger.Errorf("Error closing session %s: %v", sessionID, err)
 	}
 
-	if manager.logger != nil {
-		manager.logger.Infof("Removed session %s", sessionID)
-	}
-
+	manager.logger.Infof("Removed session %s", sessionID)
 	return nil
 }
 
-// GetSession retrieves a session by ID
+// GetSession retrieves a session by its ID.
 func (manager *ConnectionManager) GetSession(sessionID string) (*BridgeSession, bool) {
 	manager.sessionsMutex.RLock()
+	defer manager.sessionsMutex.RUnlock()
 	session, exists := manager.activeSessions[sessionID]
-	manager.sessionsMutex.RUnlock()
 	return session, exists
 }
 
-// GetActiveSessions returns a copy of all active sessions
+// GetActiveSessions returns a copy of the map of active sessions.
 func (manager *ConnectionManager) GetActiveSessions() map[string]*BridgeSession {
 	manager.sessionsMutex.RLock()
 	defer manager.sessionsMutex.RUnlock()
-
 	sessions := make(map[string]*BridgeSession, len(manager.activeSessions))
 	for id, session := range manager.activeSessions {
 		sessions[id] = session
@@ -185,21 +163,22 @@ func (manager *ConnectionManager) GetActiveSessions() map[string]*BridgeSession 
 	return sessions
 }
 
-// GetActiveSessionCount returns the number of active sessions
+// GetActiveSessionCount returns the current number of active sessions.
 func (manager *ConnectionManager) GetActiveSessionCount() int {
 	manager.sessionsMutex.RLock()
 	defer manager.sessionsMutex.RUnlock()
 	return len(manager.activeSessions)
 }
 
-// GetHostConnectionCount returns the number of connections to a specific host
+// GetHostConnectionCount returns the number of active connections to a specific host.
 func (manager *ConnectionManager) GetHostConnectionCount(targetAddress string) int {
 	manager.hostMutex.RLock()
 	defer manager.hostMutex.RUnlock()
 	return manager.hostConnections[targetAddress]
 }
 
-// checkGlobalConnectionLimit checks if the global connection limit is exceeded
+// checkGlobalConnectionLimit verifies that the total number of active sessions
+// is within the configured limit.
 func (manager *ConnectionManager) checkGlobalConnectionLimit() error {
 	if manager.GetActiveSessionCount() >= manager.config.MaxConnections {
 		return fmt.Errorf("maximum number of connections (%d) reached", manager.config.MaxConnections)
@@ -207,7 +186,8 @@ func (manager *ConnectionManager) checkGlobalConnectionLimit() error {
 	return nil
 }
 
-// checkHostConnectionLimit checks if the per-host connection limit is exceeded
+// checkHostConnectionLimit verifies that the number of active sessions to a
+// specific host is within the configured limit.
 func (manager *ConnectionManager) checkHostConnectionLimit(targetAddress string) error {
 	hostCount := manager.GetHostConnectionCount(targetAddress)
 	if hostCount >= manager.config.MaxConnectionsPerHost {
@@ -216,7 +196,7 @@ func (manager *ConnectionManager) checkHostConnectionLimit(targetAddress string)
 	return nil
 }
 
-// generateSessionID generates a unique session ID
+// generateSessionID creates a cryptographically secure, unique identifier for a session.
 func (manager *ConnectionManager) generateSessionID() (string, error) {
 	bytes := make([]byte, 16)
 	if _, err := rand.Read(bytes); err != nil {
@@ -225,56 +205,45 @@ func (manager *ConnectionManager) generateSessionID() (string, error) {
 	return hex.EncodeToString(bytes), nil
 }
 
-// configureWebSocket configures WebSocket connection settings
+// configureWebSocket applies the necessary settings to the WebSocket connection,
+// including read limits and timeouts.
 func (manager *ConnectionManager) configureWebSocket(webSocketConn *websocket.Conn) error {
 	webSocketConn.SetReadLimit(manager.config.WebSocketReadLimit)
-
-	// Set timeouts
 	if err := webSocketConn.SetReadDeadline(time.Now().Add(manager.config.SSHHandshakeTimeout)); err != nil {
 		return fmt.Errorf("failed to set WebSocket read deadline: %v", err)
 	}
 	if err := webSocketConn.SetWriteDeadline(time.Now().Add(30 * time.Second)); err != nil {
 		return fmt.Errorf("failed to set WebSocket write deadline: %v", err)
 	}
-
-	// Set ping handler
 	webSocketConn.SetPingHandler(func(appData string) error {
-		if manager.logger != nil {
-			manager.logger.Debug("Received WebSocket ping, sending pong")
-		}
+		manager.logger.Debug("Received WebSocket ping, sending pong")
 		return webSocketConn.WriteControl(websocket.PongMessage, nil, time.Now().Add(time.Second))
 	})
-
 	return nil
 }
 
-// handleSessionFailure handles session initialization failures
+// handleSessionFailure logs the failure and ensures the session is removed.
 func (manager *ConnectionManager) handleSessionFailure(session *BridgeSession, err error) {
 	manager.statsMutex.Lock()
 	manager.failedSessions++
 	manager.statsMutex.Unlock()
-
-	if manager.logger != nil {
-		manager.logger.Errorf("Session %s failed: %v", session.ID, err)
-	}
-
-	// Remove from active sessions
-	if removeErr := manager.RemoveSession(session.ID); removeErr != nil && manager.logger != nil {
+	manager.logger.Errorf("Session %s failed: %v", session.ID, err)
+	if removeErr := manager.RemoveSession(session.ID); removeErr != nil {
 		manager.logger.Errorf("Failed to remove failed session %s: %v", session.ID, removeErr)
 	}
 }
 
-// startCleanupRoutine starts a routine to clean up inactive sessions
+// startCleanupRoutine runs a periodic task to remove inactive sessions.
 func (manager *ConnectionManager) startCleanupRoutine() {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
-
 	for range ticker.C {
 		manager.cleanupInactiveSessions()
 	}
 }
 
-// cleanupInactiveSessions removes sessions that have been inactive for too long
+// cleanupInactiveSessions iterates through active sessions and removes any
+// that have been idle for longer than the configured timeout.
 func (manager *ConnectionManager) cleanupInactiveSessions() {
 	cutoff := time.Now().Add(-manager.config.ConnectionTimeout)
 	var sessionsToRemove []string
@@ -288,57 +257,49 @@ func (manager *ConnectionManager) cleanupInactiveSessions() {
 	manager.sessionsMutex.RUnlock()
 
 	for _, sessionID := range sessionsToRemove {
-		if manager.logger != nil {
-			manager.logger.Infof("Cleaning up inactive session %s", sessionID)
-		}
-		if err := manager.RemoveSession(sessionID); err != nil && manager.logger != nil {
+		manager.logger.Infof("Cleaning up inactive session %s", sessionID)
+		if err := manager.RemoveSession(sessionID); err != nil {
 			manager.logger.Errorf("Failed to remove inactive session %s: %v", sessionID, err)
 		}
 	}
 }
 
-// ParseTargetAddress extracts the target SSH address from HTTP request URL path
-// The expected format is: /ws/{host}/{port}
+// ParseTargetAddress extracts the target SSH host and port from the request URL.
+// The expected URL format is /ws/{host}/{port}.
 func (manager *ConnectionManager) ParseTargetAddress(request *http.Request) (string, error) {
 	pathParts := strings.Split(request.URL.Path, "/")
 	if len(pathParts) < 4 {
-		return "", fmt.Errorf("URL does not contain valid host and port")
+		return "", fmt.Errorf("URL does not contain a valid host and port")
 	}
-	return pathParts[2] + ":" + pathParts[3], nil
+	return net.JoinHostPort(pathParts[2], pathParts[3]), nil
 }
 
-// GetClientIP extracts the client IP address from the HTTP request
+// GetClientIP determines the client's IP address by checking common proxy headers
+// first, then falling back to the remote address of the connection.
 func (manager *ConnectionManager) GetClientIP(request *http.Request) string {
-	// Check for X-Forwarded-For header first
 	if xff := request.Header.Get("X-Forwarded-For"); xff != "" {
-		// Take the first IP if multiple are present
 		if ips := strings.Split(xff, ","); len(ips) > 0 {
 			return strings.TrimSpace(ips[0])
 		}
 	}
-
-	// Check for X-Real-IP header
 	if xri := request.Header.Get("X-Real-IP"); xri != "" {
 		return xri
 	}
-
-	// Fall back to RemoteAddr
 	if host, _, err := net.SplitHostPort(request.RemoteAddr); err == nil {
 		return host
 	}
-
 	return request.RemoteAddr
 }
 
-// GetStats returns connection manager statistics
+// GetStats returns a map of the connection manager's current statistics.
 func (manager *ConnectionManager) GetStats() map[string]interface{} {
 	manager.statsMutex.RLock()
-	totalSessions := manager.totalSessions
-	successfulSessions := manager.successfulSessions
-	failedSessions := manager.failedSessions
+	total := manager.totalSessions
+	successful := manager.successfulSessions
+	failed := manager.failedSessions
 	manager.statsMutex.RUnlock()
 
-	activeSessionCount := manager.GetActiveSessionCount()
+	active := manager.GetActiveSessionCount()
 
 	manager.hostMutex.RLock()
 	hostStats := make(map[string]int)
@@ -348,35 +309,25 @@ func (manager *ConnectionManager) GetStats() map[string]interface{} {
 	manager.hostMutex.RUnlock()
 
 	return map[string]interface{}{
-		"active_sessions":     activeSessionCount,
-		"total_sessions":      totalSessions,
-		"successful_sessions": successfulSessions,
-		"failed_sessions":     failedSessions,
+		"active_sessions":     active,
+		"total_sessions":      total,
+		"successful_sessions": successful,
+		"failed_sessions":     failed,
 		"host_connections":    hostStats,
 		"max_connections":     manager.config.MaxConnections,
 		"max_per_host":        manager.config.MaxConnectionsPerHost,
 	}
 }
 
-// Shutdown gracefully shuts down the connection manager
+// Shutdown gracefully terminates all active sessions and shuts down the manager.
 func (manager *ConnectionManager) Shutdown() error {
-	if manager.logger != nil {
-		manager.logger.Info("Shutting down connection manager...")
-	}
-
-	// Get all active sessions
+	manager.logger.Info("Shutting down connection manager...")
 	sessions := manager.GetActiveSessions()
-
-	// Close all active sessions
 	for sessionID := range sessions {
-		if err := manager.RemoveSession(sessionID); err != nil && manager.logger != nil {
+		if err := manager.RemoveSession(sessionID); err != nil {
 			manager.logger.Errorf("Error closing session %s during shutdown: %v", sessionID, err)
 		}
 	}
-
-	if manager.logger != nil {
-		manager.logger.Infof("Connection manager shutdown complete. Closed %d sessions.", len(sessions))
-	}
-
+	manager.logger.Infof("Connection manager shutdown complete. Closed %d sessions.", len(sessions))
 	return nil
 }

@@ -18,7 +18,8 @@ import (
 	"github.com/ubyte-source/ubyte-webssh-bridge/utils"
 )
 
-// WebSSHBridge represents the main server instance
+// WebSSHBridge encapsulates the server's state, including its configuration,
+// logger, and managers for connections and rate limiting.
 type WebSSHBridge struct {
 	config            *config.Configuration
 	logger            *logrus.Logger
@@ -28,14 +29,14 @@ type WebSSHBridge struct {
 	websocketUpgrader websocket.Upgrader
 }
 
-// NewWebSSHBridge creates a new WebSSH bridge server instance
+// NewWebSSHBridge creates and initializes a new WebSSHBridge instance.
+// It validates the provided configuration and sets up the logger, connection manager,
+// rate limiter, and WebSocket upgrader.
 func NewWebSSHBridge(cfg *config.Configuration) (*WebSSHBridge, error) {
-	// Validate configuration
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %v", err)
 	}
 
-	// Setup logger
 	logger := logrus.New()
 	if cfg.DebugMode {
 		logger.SetLevel(logrus.DebugLevel)
@@ -43,10 +44,7 @@ func NewWebSSHBridge(cfg *config.Configuration) (*WebSSHBridge, error) {
 		logger.SetLevel(logrus.InfoLevel)
 	}
 
-	// Create connection manager
 	connectionManager := connection.NewConnectionManager(cfg, logger)
-
-	// Create rate limiter
 	rateLimiter := utils.NewRateLimiter(
 		cfg.RateLimitInterval,
 		cfg.RateLimitBurst,
@@ -54,49 +52,43 @@ func NewWebSSHBridge(cfg *config.Configuration) (*WebSSHBridge, error) {
 		cfg.RateLimitWhitelist,
 	)
 
-	// Setup WebSocket upgrader
-	upgrader := websocket.Upgrader{
-		ReadBufferSize:   cfg.WebSocketReadBufferSize,
-		WriteBufferSize:  cfg.WebSocketWriteBufferSize,
-		HandshakeTimeout: cfg.WebSocketHandshakeTimeout,
-		CheckOrigin:      func(r *http.Request) bool { return true },
-	}
-
 	server := &WebSSHBridge{
 		config:            cfg,
 		logger:            logger,
 		connectionManager: connectionManager,
 		rateLimiter:       rateLimiter,
-		websocketUpgrader: upgrader,
+	}
+
+	server.websocketUpgrader = websocket.Upgrader{
+		ReadBufferSize:   cfg.WebSocketReadBufferSize,
+		WriteBufferSize:  cfg.WebSocketWriteBufferSize,
+		HandshakeTimeout: cfg.WebSocketHandshakeTimeout,
+		CheckOrigin:      server.checkOrigin,
 	}
 
 	return server, nil
 }
 
-// Start starts the WebSSH bridge server
+// Start configures and starts the HTTP server, including routing and TLS.
+// It blocks until the server is shut down.
 func (bridge *WebSSHBridge) Start() error {
-	// Setup HTTP server
 	mux := http.NewServeMux()
-
-	// Register handlers
 	mux.HandleFunc("/ws/", bridge.handleWebSocket)
 
 	if bridge.config.EnableHealthCheck {
 		mux.HandleFunc(bridge.config.HealthCheckPath, bridge.handleHealthCheck)
 	}
-
 	if bridge.config.EnableMetrics {
 		mux.HandleFunc(bridge.config.MetricsPath, bridge.handleMetrics)
 	}
 
 	bridge.httpServer = &http.Server{
-		Addr:    bridge.config.ListenAddress,
-		Handler: mux,
+		Addr:      bridge.config.ListenAddress,
+		Handler:   mux,
+		TLSConfig: config.SecureTLSConfig(),
 	}
 
 	bridge.logger.Infof("Starting WebSSH Bridge server on %s", bridge.config.ListenAddress)
-
-	// Start server with TLS
 	if err := bridge.httpServer.ListenAndServeTLS(bridge.config.CertificateFile, bridge.config.KeyFile); err != nil && err != http.ErrServerClosed {
 		return fmt.Errorf("server failed to start: %v", err)
 	}
@@ -104,65 +96,78 @@ func (bridge *WebSSHBridge) Start() error {
 	return nil
 }
 
-// Stop gracefully stops the WebSSH bridge server
+// Stop gracefully shuts down the server, closing all active components.
 func (bridge *WebSSHBridge) Stop() error {
 	bridge.logger.Info("Shutting down WebSSH Bridge server...")
 
-	// Create shutdown context with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), bridge.config.ShutdownTimeout)
 	defer cancel()
 
-	// Shutdown HTTP server
 	if err := bridge.httpServer.Shutdown(ctx); err != nil {
 		bridge.logger.Errorf("HTTP server shutdown error: %v", err)
 	}
 
-	// Shutdown connection manager
 	if err := bridge.connectionManager.Shutdown(); err != nil {
 		bridge.logger.Errorf("Connection manager shutdown error: %v", err)
 	}
 
-	// Close rate limiter
 	bridge.rateLimiter.Close()
 
 	bridge.logger.Info("WebSSH Bridge server shutdown complete")
 	return nil
 }
 
-// handleWebSocket handles WebSocket connections
+// checkOrigin performs a security check to prevent Cross-Site WebSocket Hijacking (CSWH).
+// It ensures that the WebSocket connection's origin matches the server's host.
+func (bridge *WebSSHBridge) checkOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true // Allow non-browser clients
+	}
+	host := r.Host
+	if origin != "https://"+host && origin != "http://"+host {
+		bridge.logger.Warnf("WebSocket connection from untrusted origin %s blocked (host: %s)", origin, host)
+		return false
+	}
+	return true
+}
+
+// handleWebSocket manages the entire lifecycle of a WebSocket connection.
+// It handles rate limiting, upgrades the connection, creates a session, and bridges
+// communication between the WebSocket and the SSH server.
 func (bridge *WebSSHBridge) handleWebSocket(responseWriter http.ResponseWriter, request *http.Request) {
-	// Parse target address
 	targetAddress, err := bridge.connectionManager.ParseTargetAddress(request)
 	if err != nil {
 		http.Error(responseWriter, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	// Get client IP
 	clientIP := bridge.connectionManager.GetClientIP(request)
-
-	// Check rate limiting
 	if !bridge.rateLimiter.IsAllowed(clientIP) {
 		http.Error(responseWriter, "Rate limit exceeded. Please wait before trying again", http.StatusTooManyRequests)
 		bridge.logger.Warnf("Rate limit exceeded for IP %s connecting to %s", clientIP, targetAddress)
 		return
 	}
 
-	// Upgrade HTTP connection to WebSocket
 	webSocketConn, err := bridge.websocketUpgrader.Upgrade(responseWriter, request, nil)
 	if err != nil {
 		bridge.logger.Errorf("WebSocket upgrade error: %v", err)
 		return
 	}
+	defer func() {
+		if err := webSocketConn.Close(); err != nil {
+			bridge.logger.Errorf("Failed to close WebSocket connection: %v", err)
+		}
+	}()
 
-	// Create bridge session
+	webSocketConn.SetReadLimit(bridge.config.WebSocketReadLimit)
+
 	session, err := bridge.connectionManager.CreateSession(webSocketConn, targetAddress, clientIP)
 	if err != nil {
 		bridge.handleWebSocketError(webSocketConn, "Failed to create session", err)
 		return
 	}
 
-	// Read SSH credentials from WebSocket
 	credentials, err := bridge.readSSHCredentials(webSocketConn)
 	if err != nil {
 		bridge.handleWebSocketError(webSocketConn, "Failed to read SSH credentials", err)
@@ -172,7 +177,6 @@ func (bridge *WebSSHBridge) handleWebSocket(responseWriter http.ResponseWriter, 
 		return
 	}
 
-	// Initialize session with SSH connection
 	if err := bridge.connectionManager.InitializeSession(session, credentials); err != nil {
 		bridge.handleWebSocketError(webSocketConn, "Failed to initialize SSH connection", err)
 		return
@@ -180,27 +184,23 @@ func (bridge *WebSSHBridge) handleWebSocket(responseWriter http.ResponseWriter, 
 
 	bridge.logger.Infof("WebSocket session %s established: %s -> %s", session.ID, clientIP, targetAddress)
 
-	// Wait for session completion
 	if err := session.WaitForCompletion(); err != nil {
 		bridge.logger.Debugf("SSH session %s completed with error: %v", session.ID, err)
 	}
 
-	// Clean up session
 	if removeErr := bridge.connectionManager.RemoveSession(session.ID); removeErr != nil {
 		bridge.logger.Errorf("Failed to remove session %s after completion: %v", session.ID, removeErr)
 	}
 }
 
-// handleHealthCheck handles health check requests
+// handleHealthCheck provides a simple health status of the server.
 func (bridge *WebSSHBridge) handleHealthCheck(responseWriter http.ResponseWriter, request *http.Request) {
 	stats := bridge.connectionManager.GetStats()
-
 	health := map[string]interface{}{
 		"status":          "healthy",
 		"timestamp":       time.Now().UTC(),
 		"active_sessions": stats["active_sessions"],
 		"total_sessions":  stats["total_sessions"],
-		"uptime":          "unknown", // Could be implemented if needed
 	}
 
 	responseWriter.Header().Set("Content-Type", "application/json")
@@ -210,11 +210,10 @@ func (bridge *WebSSHBridge) handleHealthCheck(responseWriter http.ResponseWriter
 	}
 }
 
-// handleMetrics handles metrics requests
+// handleMetrics exposes performance and usage metrics.
 func (bridge *WebSSHBridge) handleMetrics(responseWriter http.ResponseWriter, request *http.Request) {
 	connectionStats := bridge.connectionManager.GetStats()
 	rateLimiterStats := bridge.rateLimiter.GetStats()
-
 	metrics := map[string]interface{}{
 		"connections": connectionStats,
 		"limiter":     rateLimiterStats,
@@ -228,7 +227,8 @@ func (bridge *WebSSHBridge) handleMetrics(responseWriter http.ResponseWriter, re
 	}
 }
 
-// readSSHCredentials reads and parses SSH credentials from WebSocket
+// readSSHCredentials reads the initial JSON message from the client, which
+// contains the SSH credentials.
 func (bridge *WebSSHBridge) readSSHCredentials(webSocketConn *websocket.Conn) (message.Credentials, error) {
 	_, initialMessage, err := webSocketConn.ReadMessage()
 	if err != nil {
@@ -243,7 +243,7 @@ func (bridge *WebSSHBridge) readSSHCredentials(webSocketConn *websocket.Conn) (m
 	return credentials, nil
 }
 
-// handleWebSocketError handles WebSocket-related errors
+// handleWebSocketError logs an error and ensures the WebSocket connection is closed.
 func (bridge *WebSSHBridge) handleWebSocketError(webSocketConn *websocket.Conn, errorMessage string, err error) {
 	if closeErr := webSocketConn.Close(); closeErr != nil {
 		bridge.logger.Errorf("Failed to close WebSocket after error: %v", closeErr)
@@ -251,19 +251,17 @@ func (bridge *WebSSHBridge) handleWebSocketError(webSocketConn *websocket.Conn, 
 	bridge.logger.Errorf("%s: %v", errorMessage, err)
 }
 
-// Run starts the server and handles graceful shutdown
+// Run starts the server and sets up a signal handler for graceful shutdown.
+// It blocks until the server is terminated.
 func (bridge *WebSSHBridge) Run() error {
-	// Setup signal handling for graceful shutdown
 	signalChannel := make(chan os.Signal, 1)
 	signal.Notify(signalChannel, syscall.SIGINT, syscall.SIGTERM)
 
-	// Start server in goroutine
 	serverError := make(chan error, 1)
 	go func() {
 		serverError <- bridge.Start()
 	}()
 
-	// Wait for shutdown signal or server error
 	select {
 	case err := <-serverError:
 		if err != nil {
