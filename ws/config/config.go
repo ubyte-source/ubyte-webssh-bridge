@@ -49,7 +49,7 @@ type Configuration struct {
 // DefaultConfiguration returns a configuration with sensible defaults
 func DefaultConfiguration() *Configuration {
 	return &Configuration{
-		ListenAddress:             ":8080",
+		ListenAddress:             "127.0.0.1:8080",
 		CertificateFile:           "/data/certificate.crt",
 		KeyFile:                   "/data/certificate.key",
 		DebugMode:                 false,
