@@ -216,9 +216,9 @@ func (bridge *WebSSHBridge) handleMetrics(responseWriter http.ResponseWriter, re
 	rateLimiterStats := bridge.rateLimiter.GetStats()
 
 	metrics := map[string]interface{}{
-		"connections":  connectionStats,
-		"rate_limiter": rateLimiterStats,
-		"timestamp":    time.Now().UTC(),
+		"connections": connectionStats,
+		"limiter":     rateLimiterStats,
+		"timestamp":   time.Now().UTC(),
 	}
 
 	responseWriter.Header().Set("Content-Type", "application/json")
