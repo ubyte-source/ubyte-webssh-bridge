@@ -1,553 +1,417 @@
+// Package main implements a WebSocket-based SSH client.
+// It supports resizing the terminal, handling SSH sessions,
+// and user authentication via WebSockets.
 package main
 
 import (
-    "context"
-    "encoding/json"
-    "flag"
-    "fmt"
-    "io"
-    "net/http"
-    "strings"
-    "sync"
-    "time"
+	"context"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"log"
+	"net"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
 
-    "github.com/gorilla/websocket"
-    "github.com/sirupsen/logrus"
-    "golang.org/x/crypto/ssh"
+	"github.com/gorilla/websocket"
+	"golang.org/x/crypto/ssh"
 )
 
-var (
-    // debugMode determines whether debug logging is enabled.
-    debugMode bool
-    // listenAddress is the HTTP server's listening address.
-    listenAddress string
-    // certificateFile and keyFile are the paths to the TLS certificate and key files.
-    certificateFile string
-    keyFile         string
-    // attemptsLock and lastAttempt are used for connection throttling.
-    attemptsLock sync.Mutex
-    lastAttempt  = make(map[string]time.Time)
-)
+// Global variables are documented directly above their declaration.
+// debugMode indicates if the server is running in debug mode.
+var debugMode bool
 
+// listenAddress specifies the server address to listen on.
+var listenAddress string
+
+// attemptsLock is a mutex for synchronizing access to lastAttempt.
+var attemptsLock sync.Mutex
+
+// lastAttempt tracks the last attempt time for SSH connections by IP address.
+var lastAttempt = make(map[string]time.Time)
+
+// attemptInterval defines the cooldown period between attempts from the same IP.
 const attemptInterval = 2 * time.Second
 
-/**
- * init initializes command-line flags and configures Logrus logging level.
- */
+// SSH timeout constants for RADIUS authentication support
+const (
+	// sshConnectTimeout defines the timeout for establishing TCP connection to SSH server
+	sshConnectTimeout = 10 * time.Second
+	// sshAuthTimeout defines the timeout for SSH authentication (including RADIUS)
+	sshAuthTimeout = 45 * time.Second
+	// sshHandshakeTimeout defines the total timeout for SSH handshake
+	sshHandshakeTimeout = 60 * time.Second
+)
+
+// init initializes command line flags and parses them.
 func init() {
-	// debugMode is a command-line flag to enable verbose logging.
-    flag.BoolVar(&debugMode, "debug", false, "Enable debug mode")
-	// listenAddress is the address to listen on
-    flag.StringVar(&listenAddress, "address", ":8080", "Address to listen on")
-	// TLS certificate and key file paths
-    flag.StringVar(&certificateFile, "cert", "/data/certificate.crt", "Path to TLS certificate file")
-    flag.StringVar(&keyFile, "key", "/data/certificate.key", "Path to TLS private key file")
-	// Parse command-line flags
-    flag.Parse()
-    if debugMode {
-        logrus.SetLevel(logrus.DebugLevel)
-    } else {
-        logrus.SetLevel(logrus.InfoLevel)
-    }
+	flag.BoolVar(&debugMode, "debug", false, "Enable debug mode")
+	flag.StringVar(&listenAddress, "address", ":8080", "Address to listen on")
+	flag.Parse()
 }
 
-/**
- * upgrader configures the WebSocket upgrade settings.
- */
+// upgrader is a WebSocket upgrader configuration that allows any origin.
 var upgrader = websocket.Upgrader{
-    ReadBufferSize:  8192,
-    WriteBufferSize: 8192,
-    CheckOrigin:     func(r *http.Request) bool { return true },
+	ReadBufferSize:   1024,
+	WriteBufferSize:  1024,
+	HandshakeTimeout: 30 * time.Second, // Extended timeout for WebSocket handshake
+	CheckOrigin: func(r *http.Request) bool {
+		return true
+	},
 }
 
-/**
- * Credentials holds SSH authentication information.
- */
+// Credentials represents the username and password for SSH authentication.
 type Credentials struct {
-    Username string `json:"username"`
-    Password string `json:"password"`
+	Username string `json:"username"`
+	Password string `json:"password"`
 }
 
-/**
- * genericMessage represents a message with an action field.
- */
+// genericMessage represents a generic action to be performed.
 type genericMessage struct {
-    Action string `json:"action"`
+	Action string `json:"action"`
 }
 
-/**
- * resizeMessage represents a terminal resize command.
- */
+// resizeMessage represents a request to resize the terminal.
 type resizeMessage struct {
-    Cols int `json:"cols"`
-    Rows int `json:"rows"`
+	Cols int `json:"cols"`
+	Rows int `json:"rows"`
 }
 
-/**
- * actionHandler defines the function type for handling action messages.
- */
+// actionHandler defines a function type for handling actions.
 type actionHandler func(*ssh.Session, []byte) error
 
+// handlers maps action strings to their corresponding handler functions.
 var handlers = map[string]actionHandler{
-    "resize": handleResize,
-    "ping":   handlePing,
+	"resize": handleResize,
+	"ping":   handlePing,
 }
 
-/**
- * debugLog logs messages only if debugMode is enabled.
- * @param level The log level label.
- * @param format The log format string.
- * @param args Additional arguments.
- */
+// debugLog logs debug messages if debug mode is enabled.
+// @param level the log level (e.g., "INFO", "ERROR").
+// @param format the format string for the log message.
+// @param args the arguments to format into the log message.
 func debugLog(level, format string, args ...interface{}) {
-    if debugMode {
-        logrus.Debugf("["+level+"] "+format, args...)
-    }
+	if debugMode {
+		log.Printf("%s: "+format, append([]interface{}{level}, args...)...)
+	}
 }
 
-/**
- * handleResize processes the terminal resize command.
- * @param session The SSH session.
- * @param message The JSON encoded message.
- * @return An error if any occurs during processing.
- */
+// handleResize handles terminal resize requests.
+// @param session the SSH session to resize.
+// @param message the resize message containing new dimensions.
+// @return error indicating success or failure of the resize operation.
 func handleResize(session *ssh.Session, message []byte) error {
-    var rm resizeMessage
-    if err := json.Unmarshal(message, &rm); err != nil {
-        return fmt.Errorf("error unmarshalling resize message: %v", err)
-    }
-    debugLog("INFO", "Resizing terminal to cols: %d, rows: %d", rm.Cols, rm.Rows)
-    return session.WindowChange(rm.Rows, rm.Cols)
+	var resizeMsg resizeMessage
+	if err := json.Unmarshal(message, &resizeMsg); err != nil {
+		return fmt.Errorf("error unmarshalling resize message: %v", err)
+	}
+	debugLog("INFO", "Resizing to cols: %d, rows: %d", resizeMsg.Cols, resizeMsg.Rows)
+	return session.WindowChange(resizeMsg.Rows, resizeMsg.Cols)
 }
 
-/**
- * handlePing processes the ping action.
- * @param session The SSH session.
- * @param message The JSON encoded message.
- * @return An error if any occurs during processing.
- */
+// handlePing handles ping messages from the client.
+// @param session the SSH session (not used here).
+// @param message the ping message.
+// @return error indicating success or failure of the ping handling.
 func handlePing(session *ssh.Session, message []byte) error {
-    debugLog("INFO", "Received ping action")
-    return nil
+	debugLog("INFO", "Received ping from client")
+	// Respond to the ping if necessary, but typically nothing needs to be done here.
+	return nil
 }
 
-/**
- * isAttemptAllowed checks if a new connection attempt from destIP is allowed.
- * @param destIP The destination IP address.
- * @return True if allowed, false otherwise.
- */
+// isAttemptAllowed checks if a new attempt is allowed from the given IP address.
+// @param destIP the IP address to check.
+// @return bool indicating if an attempt is allowed.
 func isAttemptAllowed(destIP string) bool {
-    last, exists := lastAttempt[destIP]
-    return !exists || time.Since(last) > attemptInterval
+	last, exists := lastAttempt[destIP]
+	if !exists || time.Since(last) > attemptInterval {
+		return true
+	}
+	return false
 }
 
-/**
- * canAttemptNow checks if a new SSH connection attempt can proceed.
- * @param destIP The destination IP address.
- * @return True if the attempt is allowed, false otherwise.
- */
+// recordAttemptAndScheduleCleanup records a new attempt and schedules its cleanup.
+// @param destIP the IP address of the attempt.
+func recordAttemptAndScheduleCleanup(destIP string) {
+	attemptsLock.Lock()
+	defer attemptsLock.Unlock()
+
+	lastAttempt[destIP] = time.Now()
+	time.AfterFunc(attemptInterval, func() {
+		attemptsLock.Lock()
+		delete(lastAttempt, destIP)
+		attemptsLock.Unlock()
+	})
+}
+
+// canAttemptNow checks if a new attempt can be made now, and records it if so.
+// @param destIP the IP address of the attempt.
+// @return bool indicating if the attempt can proceed.
 func canAttemptNow(destIP string) bool {
-    attemptsLock.Lock()
-    allowed := isAttemptAllowed(destIP)
-    if allowed {
-        lastAttempt[destIP] = time.Now()
-    }
-    attemptsLock.Unlock()
-    if allowed {
-        time.AfterFunc(attemptInterval, func() {
-            attemptsLock.Lock()
-            delete(lastAttempt, destIP)
-            attemptsLock.Unlock()
-        })
-    }
-    return allowed
+	attemptsLock.Lock()
+	allowed := isAttemptAllowed(destIP)
+	attemptsLock.Unlock()
+
+	if allowed {
+		recordAttemptAndScheduleCleanup(destIP)
+		return true
+	}
+	return false
 }
 
-/**
- * parseTargetAddress extracts the target SSH address from the URL path.
- * The expected format is: /ws/{host}/{port}
- * @param r The HTTP request.
- * @return The target address as a string or an error if the format is invalid.
- */
-func parseTargetAddress(r *http.Request) (string, error) {
-    parts := strings.Split(r.URL.Path, "/")
-    if len(parts) < 4 {
-        return "", fmt.Errorf("URL does not contain valid host and port")
-    }
-    return parts[2] + ":" + parts[3], nil
+// dialSSHWithTimeout creates an SSH connection with custom timeouts for RADIUS authentication.
+// @param network the network type (e.g., "tcp").
+// @param addr the address to connect to.
+// @param config the SSH client configuration.
+// @return *ssh.Client the SSH client.
+// @return error any error that occurred during connection.
+func dialSSHWithTimeout(network, addr string, config *ssh.ClientConfig) (*ssh.Client, error) {
+	debugLog("INFO", "Attempting SSH connection to %s with extended timeout for RADIUS auth", addr)
+
+	// Create a context with timeout for the entire SSH handshake
+	ctx, cancel := context.WithTimeout(context.Background(), sshHandshakeTimeout)
+	defer cancel()
+
+	// Create a custom dialer with connection timeout
+	dialer := &net.Dialer{
+		Timeout: sshConnectTimeout,
+	}
+
+	// Establish TCP connection with timeout
+	conn, err := dialer.DialContext(ctx, network, addr)
+	if err != nil {
+		debugLog("ERROR", "TCP connection failed to %s: %v", addr, err)
+		return nil, fmt.Errorf("TCP connection failed: %v", err)
+	}
+
+	// Set a longer timeout for the SSH client configuration to handle RADIUS
+	config.Timeout = sshAuthTimeout
+
+	debugLog("INFO", "TCP connection established, starting SSH handshake with %v timeout", sshAuthTimeout)
+
+	// Perform SSH handshake with the established connection
+	sshConn, chans, reqs, err := ssh.NewClientConn(conn, addr, config)
+	if err != nil {
+		conn.Close()
+		debugLog("ERROR", "SSH handshake failed to %s: %v", addr, err)
+		return nil, fmt.Errorf("SSH handshake failed: %v", err)
+	}
+
+	debugLog("INFO", "SSH connection successfully established to %s", addr)
+
+	// Return the SSH connection wrapped in a client
+	return ssh.NewClient(sshConn, chans, reqs), nil
 }
 
-/**
- * newSSHConfig returns an SSH client configuration based on provided credentials.
- * @param creds The SSH credentials.
- * @return A pointer to the SSH client configuration.
- */
-func newSSHConfig(creds Credentials) *ssh.ClientConfig {
-    return &ssh.ClientConfig{
-        User:            creds.Username,
-        Auth:            []ssh.AuthMethod{ssh.Password(creds.Password)},
-        HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-        Config: ssh.Config{
-            KeyExchanges: []string{
-                "curve25519-sha256",
+// handleWebSocket handles incoming WebSocket connections for SSH session management.
+// @param w the HTTP response writer.
+// @param r the HTTP request containing the WebSocket upgrade request.
+func handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	pathSegments := strings.Split(r.URL.Path, "/")
+	if len(pathSegments) < 4 {
+		http.Error(w, "URL does not contain valid host and port", http.StatusBadRequest)
+		return
+	}
+	host, port := pathSegments[2], pathSegments[3]
+	sshAddr := host + ":" + port
+
+	if !canAttemptNow(sshAddr) {
+		http.Error(w, "Please wait before trying again", http.StatusTooManyRequests)
+		return
+	}
+
+	ws, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("WebSocket upgrade error: %v", err)
+		return
+	}
+	defer ws.Close()
+
+	// Set extended timeouts for WebSocket operations to handle RADIUS delays
+	ws.SetReadDeadline(time.Now().Add(sshHandshakeTimeout))
+	ws.SetWriteDeadline(time.Now().Add(30 * time.Second))
+
+	// Set the ping handler
+	ws.SetPingHandler(func(appData string) error {
+		debugLog("INFO", "Received ping, sending pong")
+		return ws.WriteControl(websocket.PongMessage, []byte{}, time.Now().Add(time.Second))
+	})
+
+	_, msg, err := ws.ReadMessage()
+	if err != nil {
+		log.Printf("Error reading WebSocket message: %v", err)
+		return
+	}
+
+	var creds Credentials
+	if err := json.Unmarshal(msg, &creds); err != nil {
+		log.Printf("Error unmarshalling credentials: %v", err)
+		return
+	}
+
+	sshConfig := &ssh.ClientConfig{
+		User:            creds.Username,
+		Auth:            []ssh.AuthMethod{ssh.Password(creds.Password)},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Config: ssh.Config{
+			KeyExchanges: []string{
+				"curve25519-sha256",
 				"curve25519-sha256@libssh.org",
-                "ecdh-sha2-nistp256",
+				"ecdh-sha2-nistp256",
 				"ecdh-sha2-nistp384",
 				"ecdh-sha2-nistp521",
-                "diffie-hellman-group14-sha1",
+				"diffie-hellman-group14-sha1",
 				"diffie-hellman-group14-sha256",
-                "diffie-hellman-group16-sha512",
+				"diffie-hellman-group16-sha512",
 				"diffie-hellman-group18-sha512",
-                "diffie-hellman-group-exchange-sha256",
+				"diffie-hellman-group-exchange-sha256",
 				"diffie-hellman-group-exchange-sha1",
-            },
-            Ciphers: []string{
-                "aes128-cbc",
+			},
+			Ciphers: []string{
+				"aes128-cbc",
 				"aes192-cbc",
 				"aes256-cbc",
-                "aes128-ctr",
+				"aes128-ctr",
 				"aes192-ctr",
 				"aes256-ctr",
-                "aes128-gcm@openssh.com",
+				"aes128-gcm@openssh.com",
 				"aes256-gcm@openssh.com",
-                "chacha20-poly1305@openssh.com",
+				"chacha20-poly1305@openssh.com",
 				"3des-cbc",
-            },
-        },
-    }
+			},
+		},
+	}
+
+	sshConn, err := dialSSHWithTimeout("tcp", sshAddr, sshConfig)
+	if err != nil {
+		log.Printf("Error connecting to SSH with extended timeout: %v", err)
+		return
+	}
+	defer sshConn.Close()
+
+	session, err := sshConn.NewSession()
+	if err != nil {
+		log.Printf("Error creating SSH session: %v", err)
+		return
+	}
+	defer session.Close()
+
+	modes := ssh.TerminalModes{
+		ssh.ECHO:          1,
+		ssh.TTY_OP_ISPEED: 14400,
+		ssh.TTY_OP_OSPEED: 14400,
+	}
+	if err := session.RequestPty("xterm", 24, 80, modes); err != nil {
+		debugLog("ERROR", "Error requesting pty: %v", err)
+		return
+	}
+
+	stdinPipe, err := session.StdinPipe()
+	if err != nil {
+		debugLog("ERROR", "Error obtaining stdin pipe: %v", err)
+		return
+	}
+	defer stdinPipe.Close()
+
+	stdoutPipe, err := session.StdoutPipe()
+	if err != nil {
+		debugLog("ERROR", "Error obtaining stdout pipe: %v", err)
+		return
+	}
+
+	session.Stderr = session.Stdout
+
+	go handleWebSocketMessages(ws, stdinPipe, session)
+	go handleSSHOutput(ws, stdoutPipe)
+	go keepAlive(ws)
+
+	if err := session.Shell(); err != nil {
+		debugLog("ERROR", "Error starting shell: %v", err)
+		return
+	}
+	session.Wait()
 }
 
-/**
- * setupSSHSession initializes a new SSH session by requesting a PTY and obtaining the necessary I/O pipes.
- * @param sshConn The SSH client connection.
- * @return The SSH session, stdin pipe, stdout pipe, and an error if any occurs.
- */
-func setupSSHSession(sshConn *ssh.Client) (*ssh.Session, io.WriteCloser, io.Reader, error) {
-    session, err := sshConn.NewSession()
-    if err != nil {
-        return nil, nil, nil, fmt.Errorf("failed to create SSH session: %v", err)
-    }
-    modes := ssh.TerminalModes{ssh.ECHO: 1, ssh.TTY_OP_ISPEED: 14400, ssh.TTY_OP_OSPEED: 14400}
-    if err := session.RequestPty("xterm", 24, 80, modes); err != nil {
-        session.Close()
-        return nil, nil, nil, fmt.Errorf("failed to request PTY: %v", err)
-    }
-    stdinPipe, err := session.StdinPipe()
-    if err != nil {
-        session.Close()
-        return nil, nil, nil, fmt.Errorf("failed to obtain stdin pipe: %v", err)
-    }
-    stdoutPipe, err := session.StdoutPipe()
-    if err != nil {
-        session.Close()
-        return nil, nil, nil, fmt.Errorf("failed to obtain stdout pipe: %v", err)
-    }
-    session.Stderr = session.Stdout
-    return session, stdinPipe, stdoutPipe, nil
+// handleWebSocketMessages reads messages from the WebSocket and handles them.
+// @param ws the WebSocket connection.
+// @param stdinPipe the stdin pipe of the SSH session.
+// @param session the SSH session.
+func handleWebSocketMessages(ws *websocket.Conn, stdinPipe io.WriteCloser, session *ssh.Session) {
+	defer stdinPipe.Close()
+
+	for {
+		_, message, err := ws.ReadMessage()
+		if err != nil {
+			debugLog("ERROR", "WebSocket message read error: %v", err)
+			break
+		}
+
+		var genMsg genericMessage
+		if err := json.Unmarshal(message, &genMsg); err != nil {
+			if _, err := stdinPipe.Write(message); err != nil {
+				debugLog("ERROR", "Error sending input to SSH: %v", err)
+				break
+			}
+			continue
+		}
+
+		if handler, exists := handlers[genMsg.Action]; exists {
+			if err := handler(session, message); err != nil {
+				debugLog("ERROR", "Error handling %s action: %v", genMsg.Action, err)
+				break
+			}
+		} else {
+			debugLog("INFO", "Unknown action: %s", genMsg.Action)
+		}
+	}
+
+	session.Close()
 }
 
-/**
- * handleSSHOutputNoBuffer reads SSH stdout and immediately writes the data to the WebSocket.
- * This avoids buffering delays so each character is sent as soon as it is read.
- * @param ctx The context for cancellation.
- * @param ws The WebSocket connection.
- * @param stdoutPipe The SSH stdout pipe.
- */
-func handleSSHOutputNoBuffer(ctx context.Context, ws *websocket.Conn, stdoutPipe io.Reader) {
-    buffer := make([]byte, 8192)
-    for {
-        select {
-        case <-ctx.Done():
-            return
-        default:
-        }
-        n, err := stdoutPipe.Read(buffer)
-        if n > 0 {
-            if err := ws.WriteMessage(websocket.BinaryMessage, buffer[:n]); err != nil {
-                debugLog("ERROR", "Error writing SSH output: %v", err)
-                ws.Close()
-                return
-            }
-        }
-        if err != nil {
-            if err != io.EOF {
-                debugLog("ERROR", "Error reading SSH stdout: %v", err)
-            }
-            ws.Close()
-            return
-        }
-    }
+// handleSSHOutput forwards SSH session output to the WebSocket.
+// @param ws the WebSocket connection.
+// @param stdoutPipe the stdout pipe of the SSH session.
+func handleSSHOutput(ws *websocket.Conn, stdoutPipe io.Reader) {
+	buf := make([]byte, 1024)
+	for {
+		n, err := stdoutPipe.Read(buf)
+		if err != nil {
+			if err == io.EOF {
+				debugLog("INFO", "SSH session closed.")
+			} else {
+				debugLog("ERROR", "Error reading SSH output: %v", err)
+			}
+			ws.Close()
+			break
+		}
+		if err := ws.WriteMessage(websocket.BinaryMessage, buf[:n]); err != nil {
+			debugLog("ERROR", "Error sending output to WebSocket: %v", err)
+			ws.Close()
+			break
+		}
+	}
 }
 
-/**
- * handleWebSocketMessages reads messages from the WebSocket and processes them.
- * It delegates to helper functions to keep each step simple.
- * @param ctx The context for cancellation.
- * @param ws The WebSocket connection.
- * @param stdinPipe The SSH session's stdin pipe.
- * @param session The SSH session.
- */
-func handleWebSocketMessages(ctx context.Context, ws *websocket.Conn, stdinPipe io.WriteCloser, session *ssh.Session) {
-    defer stdinPipe.Close()
-    for {
-        mt, r, err := readNextFrame(ws, ctx)
-        if err != nil {
-            debugLog("ERROR", "WebSocket frame error: %v", err)
-            return
-        }
-        if err := handleFrame(mt, r, stdinPipe, session); err != nil {
-            debugLog("ERROR", "Frame processing error: %v", err)
-            return
-        }
-    }
+// keepAlive sends periodic ping messages to the client to keep the connection alive.
+func keepAlive(ws *websocket.Conn) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		if err := ws.WriteMessage(websocket.PingMessage, []byte{}); err != nil {
+			debugLog("ERROR", "Error sending ping: %v", err)
+			ws.Close()
+			return
+		}
+	}
 }
 
-/**
- * readNextFrame reads the next WebSocket frame, unblocking on ctx cancellation.
- * @param ws The WebSocket connection.
- * @param ctx The context to observe.
- * @return The message type, payload reader, or an error.
- */
-func readNextFrame(ws *websocket.Conn, ctx context.Context) (int, io.Reader, error) {
-    go func() { <-ctx.Done(); ws.Close() }()
-    return ws.NextReader()
-}
-
-/**
- * handleFrame dispatches the given frame to the proper handler.
- * @param mt The frame message type.
- * @param r The frame payload reader.
- * @param stdin The SSH stdin writer.
- * @param session The SSH session for action handlers.
- * @return An error if processing fails.
- */
-func handleFrame(mt int, r io.Reader, stdin io.Writer, session *ssh.Session) error {
-    switch mt {
-    case websocket.BinaryMessage:
-        return handleBinaryFrame(r, stdin)
-    case websocket.TextMessage:
-        return handleTextFrame(r, stdin, session)
-    default:
-        return nil
-    }
-}
-
-/**
- * handleBinaryFrame pipes all binary data directly to SSH stdin.
- * @param r The source reader (binary payload).
- * @param w The destination writer (SSH stdin).
- * @return An error if piping fails.
- */
-func handleBinaryFrame(r io.Reader, w io.Writer) error {
-    _, err := io.Copy(w, r)
-    return err
-}
-
-/**
- * handleTextFrame reads up to 4KB of text, tries JSON‐unmarshal,
- * invoking the action handler or writing raw to SSH stdin.
- * @param r The source reader (text payload).
- * @param w The SSH stdin writer.
- * @param session The SSH session for action handlers.
- * @return An error if processing fails.
- */
-func handleTextFrame(r io.Reader, w io.Writer, session *ssh.Session) error {
-    data, err := io.ReadAll(io.LimitReader(r, 4096))
-    if err != nil {
-        return err
-    }
-    var gm genericMessage
-    if err := json.Unmarshal(data, &gm); err != nil {
-        _, werr := w.Write(data)
-        return werr
-    }
-    if h, ok := handlers[gm.Action]; ok {
-        return h(session, data)
-    }
-    debugLog("INFO", "Unknown action: %s", gm.Action)
-    return nil
-}
-
-/**
- * runWebSocketMessages runs handleWebSocketMessages as a goroutine.
- * @param ctx The context for cancellation.
- * @param wg Pointer to the WaitGroup to signal completion.
- * @param ws The WebSocket connection.
- * @param stdinPipe The SSH session's stdin pipe.
- * @param session The SSH session.
- */
-func runWebSocketMessages(ctx context.Context, wg *sync.WaitGroup, ws *websocket.Conn, stdinPipe io.WriteCloser, session *ssh.Session) {
-    defer wg.Done()
-    handleWebSocketMessages(ctx, ws, stdinPipe, session)
-}
-
-/**
- * runSSHOutput runs handleSSHOutputNoBuffer as a goroutine.
- * @param ctx The context for cancellation.
- * @param wg Pointer to the WaitGroup to signal completion.
- * @param ws The WebSocket connection.
- * @param stdoutPipe The SSH session's stdout pipe.
- */
-func runSSHOutput(ctx context.Context, wg *sync.WaitGroup, ws *websocket.Conn, stdoutPipe io.Reader) {
-    defer wg.Done()
-    handleSSHOutputNoBuffer(ctx, ws, stdoutPipe)
-}
-
-/**
- * runKeepAlive runs keepAlive as a goroutine.
- * @param ctx The context for cancellation.
- * @param wg Pointer to the WaitGroup to signal completion.
- * @param ws The WebSocket connection.
- */
-func runKeepAlive(ctx context.Context, wg *sync.WaitGroup, ws *websocket.Conn) {
-    defer wg.Done()
-    keepAlive(ctx, ws)
-}
-
-/**
- * sshDialResult holds the result of an SSH dial operation.
- */
-type sshDialResult struct {
-    client *ssh.Client
-    err    error
-}
-
-/**
- * dialSSH performs the SSH dial operation and sends the result to the provided channel.
- * @param targetAddr The target address.
- * @param sshConfig The SSH client configuration.
- * @param resultChan The channel to send the result.
- */
-func dialSSH(targetAddr string, sshConfig *ssh.ClientConfig, resultChan chan<- sshDialResult) {
-    client, err := ssh.Dial("tcp", targetAddr, sshConfig)
-    resultChan <- sshDialResult{client: client, err: err}
-}
-
-/**
- * connectSSH attempts to establish an SSH connection with a timeout.
- * @param targetAddr The target address.
- * @param sshConfig The SSH client configuration.
- * @param timeout The timeout duration.
- * @return The SSH client or an error if connection fails or times out.
- */
-func connectSSH(targetAddr string, sshConfig *ssh.ClientConfig, timeout time.Duration) (*ssh.Client, error) {
-    resultChan := make(chan sshDialResult, 1)
-    go dialSSH(targetAddr, sshConfig, resultChan)
-    select {
-    case result := <-resultChan:
-        return result.client, result.err
-    case <-time.After(timeout):
-        return nil, fmt.Errorf("timeout connecting to SSH server")
-    }
-}
-
-/**
- * keepAlive sends periodic ping messages over the WebSocket to keep the connection alive.
- * @param ctx The context for cancellation.
- * @param ws The WebSocket connection.
- */
-func keepAlive(ctx context.Context, ws *websocket.Conn) {
-    ticker := time.NewTicker(30 * time.Second)
-    defer ticker.Stop()
-    for {
-        select {
-        case <-ctx.Done():
-            return
-        case <-ticker.C:
-            if err := ws.WriteMessage(websocket.PingMessage, nil); err != nil {
-                debugLog("ERROR", "Error sending ping: %v", err)
-                ws.Close()
-                return
-            }
-        }
-    }
-}
-
-/**
- * handleWebSocket is the main HTTP handler that upgrades the connection to WebSocket,
- * reads SSH credentials, establishes an SSH connection, sets up the SSH session,
- * and launches dedicated goroutines to handle bidirectional communication.
- * Cleanup of SSH session, pipes, goroutines, and WebSocket is done in logical cascade.
- * @param w The HTTP response writer.
- * @param r The HTTP request.
- */
-func handleWebSocket(w http.ResponseWriter, r *http.Request) {
-    targetAddr, err := parseTargetAddress(r)
-    if err != nil {
-        http.Error(w, err.Error(), http.StatusBadRequest)
-        return
-    }
-    if !canAttemptNow(targetAddr) {
-        http.Error(w, "Please wait before trying again", http.StatusTooManyRequests)
-        return
-    }
-    ws, err := upgrader.Upgrade(w, r, nil)
-    if err != nil {
-        logrus.Errorf("WebSocket upgrade error: %v", err)
-        return
-    }
-    ws.SetReadLimit(512 * 1024)
-    ws.SetPingHandler(func(appData string) error {
-        debugLog("INFO", "Received ping, sending pong")
-        return ws.WriteControl(websocket.PongMessage, nil, time.Now().Add(time.Second))
-    })
-    // Read SSH credentials
-    _, initMsg, err := ws.ReadMessage()
-    if err != nil {
-        ws.Close()
-        logrus.Errorf("Error reading initial message: %v", err)
-        return
-    }
-    var creds Credentials
-    if err := json.Unmarshal(initMsg, &creds); err != nil {
-        ws.Close()
-        logrus.Errorf("Error unmarshalling credentials: %v", err)
-        return
-    }
-    // Dial SSH
-    sshConfig := newSSHConfig(creds)
-    sshConn, err := connectSSH(targetAddr, sshConfig, 5*time.Second)
-    if err != nil {
-        ws.Close()
-        logrus.Errorf("Error connecting to SSH server: %v", err)
-        return
-    }
-    defer sshConn.Close()
-    // Setup SSH session and pipes
-    session, stdinPipe, stdoutPipe, err := setupSSHSession(sshConn)
-    if err != nil {
-        ws.Close()
-        logrus.Errorf("Error setting up SSH session: %v", err)
-        return
-    }
-    defer session.Close()
-    // Coordinate cancellation
-    ctx, cancel := context.WithCancel(context.Background())
-    var wg sync.WaitGroup
-    wg.Add(3)
-    go runWebSocketMessages(ctx, &wg, ws, stdinPipe, session)
-    go runSSHOutput(ctx, &wg, ws, stdoutPipe)
-    go runKeepAlive(ctx, &wg, ws)
-    if err := session.Shell(); err != nil {
-        cancel()
-        wg.Wait()
-        ws.Close()
-        debugLog("ERROR", "Error starting SSH shell: %v", err)
-        return
-    }
-    session.Wait()
-    cancel()
-    wg.Wait()
-    ws.Close()
-}
-
-/**
- * main is the entry point of the application.
- */
+// main is the entry point of the application.
 func main() {
-    http.HandleFunc("/ws/", handleWebSocket)
-    logrus.Infof("Secure server started on address %s", listenAddress)
-    if err := http.ListenAndServeTLS(listenAddress, certificateFile, keyFile, nil); err != nil {
-        logrus.Fatalf("ListenAndServeTLS error: %v", err)
-    }
+	http.HandleFunc("/ws/", handleWebSocket)
+	log.Printf("Server started on address %s", listenAddress)
+	log.Fatal(http.ListenAndServe(listenAddress, nil))
 }
