@@ -31,8 +31,12 @@ func (h *ResizeHandler) Handle(session *ssh.Session, messageData []byte) error {
 		return fmt.Errorf("error unmarshalling resize message: %v", err)
 	}
 
-	if resizeMsg.Cols <= 0 || resizeMsg.Rows <= 0 {
-		return fmt.Errorf("invalid terminal dimensions: cols=%d, rows=%d", resizeMsg.Cols, resizeMsg.Rows)
+	// Validate dimensions - common terminal sizes range from 1x1 to 999x999
+	if resizeMsg.Cols <= 0 || resizeMsg.Cols > 999 {
+		return fmt.Errorf("invalid terminal columns: %d (must be 1-999)", resizeMsg.Cols)
+	}
+	if resizeMsg.Rows <= 0 || resizeMsg.Rows > 999 {
+		return fmt.Errorf("invalid terminal rows: %d (must be 1-999)", resizeMsg.Rows)
 	}
 
 	if session == nil {
@@ -40,7 +44,13 @@ func (h *ResizeHandler) Handle(session *ssh.Session, messageData []byte) error {
 	}
 
 	h.logger.Debugf("Resizing terminal to cols: %d, rows: %d", resizeMsg.Cols, resizeMsg.Rows)
-	return session.WindowChange(resizeMsg.Rows, resizeMsg.Cols)
+
+	// SSH WindowChange expects (height/rows, width/cols)
+	if err := session.WindowChange(resizeMsg.Rows, resizeMsg.Cols); err != nil {
+		return fmt.Errorf("failed to resize terminal window: %v", err)
+	}
+
+	return nil
 }
 
 // PingHandler processes ping messages, which are used for keep-alive checks.

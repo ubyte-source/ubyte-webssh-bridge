@@ -135,8 +135,13 @@ func (s *BridgeSession) handleWebSocketMessages() {
 		s.updateLastActivity()
 
 		if err := s.processWebSocketMessage(messageType, reader); err != nil {
-			s.Logger.Errorf("Message processing error: %v", err)
-			return
+			// Check if this is a fatal error that should close the connection
+			if s.isFatalError(err) {
+				s.Logger.Errorf("Fatal message processing error: %v", err)
+				return
+			}
+			// For non-fatal errors, just log and continue
+			s.Logger.Warnf("Non-fatal message processing error: %v", err)
 		}
 	}
 }
@@ -278,6 +283,58 @@ func (s *BridgeSession) safeCloseWebSocket() error {
 	}
 	s.IsClosed = true
 	return s.WebSocketConn.Close()
+}
+
+// isFatalError determines if an error should cause the connection to close.
+// Only certain types of errors are considered fatal and require closing the connection.
+func (s *BridgeSession) isFatalError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Check for specific non-fatal error patterns using simple string matching
+	errStr := err.Error()
+
+	// Action processing errors are usually non-fatal
+	nonFatalPatterns := []string{
+		"unknown action",
+		"error unmarshalling",
+		"invalid terminal dimensions",
+		"cannot resize terminal",
+	}
+
+	for _, pattern := range nonFatalPatterns {
+		if s.stringContains(errStr, pattern) {
+			return false
+		}
+	}
+
+	// All other errors are considered fatal
+	return true
+}
+
+// stringContains checks if a string contains a substring using simple iteration.
+func (s *BridgeSession) stringContains(str, substr string) bool {
+	if len(substr) == 0 {
+		return true
+	}
+	if len(str) < len(substr) {
+		return false
+	}
+
+	for i := 0; i <= len(str)-len(substr); i++ {
+		match := true
+		for j := 0; j < len(substr); j++ {
+			if str[i+j] != substr[j] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
 }
 
 // updateLastActivity updates the timestamp of the last recorded activity.

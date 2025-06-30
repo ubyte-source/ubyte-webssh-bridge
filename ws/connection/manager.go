@@ -206,19 +206,22 @@ func (manager *ConnectionManager) generateSessionID() (string, error) {
 }
 
 // configureWebSocket applies the necessary settings to the WebSocket connection,
-// including read limits and timeouts.
+// including read limits and ping/pong handlers.
 func (manager *ConnectionManager) configureWebSocket(webSocketConn *websocket.Conn) error {
 	webSocketConn.SetReadLimit(manager.config.WebSocketReadLimit)
-	if err := webSocketConn.SetReadDeadline(time.Now().Add(manager.config.SSHHandshakeTimeout)); err != nil {
-		return fmt.Errorf("failed to set WebSocket read deadline: %v", err)
-	}
-	if err := webSocketConn.SetWriteDeadline(time.Now().Add(30 * time.Second)); err != nil {
-		return fmt.Errorf("failed to set WebSocket write deadline: %v", err)
-	}
+
+	// Set ping handler to respond to client pings
 	webSocketConn.SetPingHandler(func(appData string) error {
 		manager.logger.Debug("Received WebSocket ping, sending pong")
 		return webSocketConn.WriteControl(websocket.PongMessage, nil, time.Now().Add(time.Second))
 	})
+
+	// Set pong handler to log received pongs
+	webSocketConn.SetPongHandler(func(appData string) error {
+		manager.logger.Debug("Received WebSocket pong")
+		return nil
+	})
+
 	return nil
 }
 

@@ -42,19 +42,19 @@ func TestResizeHandlerDataValidation(t *testing.T) {
 			"missing cols field",
 			[]byte(`{"action":"resize","rows":24}`),
 			true,
-			"invalid terminal dimensions",
+			"invalid terminal columns",
 		},
 		{
 			"zero cols",
 			[]byte(`{"action":"resize","cols":0,"rows":24}`),
 			true,
-			"invalid terminal dimensions",
+			"invalid terminal columns",
 		},
 		{
 			"negative rows",
 			[]byte(`{"action":"resize","cols":80,"rows":-1}`),
 			true,
-			"invalid terminal dimensions",
+			"invalid terminal rows",
 		},
 	}
 

@@ -33,21 +33,10 @@
         cols, rows
       });
 
-      // Clear the terminal instance before applying the resize.
-      terminal.instance().clear();
-
       // Send the resize message through the WebSocket.
       ws.send(message);
     });
 
-    // Function to send a ping message to the server
-    function sendPing(ws) {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({
-          action: 'ping'
-        }));
-      }
-    }
 
     // Set a callback function to handle authentication actions.
     element.setCallback(function () {
@@ -94,8 +83,6 @@
         // Fit the terminal within its container.
         terminal.getFitAddon().fit();
 
-        // Set an interval to send pings every 30 seconds.
-        setInterval(() => sendPing(ws), 30000);
       });
     });
 
