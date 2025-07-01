@@ -57,7 +57,19 @@ graph TB
 - **⚡ High Performance**: Configurable buffers, connection pooling, optimized timeouts
 - **🔧 Flexible Configuration**: Environment variables, command-line options, validation
 - **🌐 Modern Web Interface**: Responsive design, xterm.js integration, auto-resize
-- **🔄 Session Management**: Connection limits, automatic cleanup, thread-safe operations
+- **🔄 Session Management**: Connection limits, automatic cleanup, idle session timeouts, thread-safe operations
+
+## 🚀 Architecture Highlights
+
+The WebSSH Bridge is built on a foundation of modern Go practices, focusing on **engineering simplicity** and **performance optimization**:
+
+- **🔧 Centralized Coordinator**: A channel-based coordinator manages all state, eliminating race conditions and simplifying concurrency.
+- **⚡ Atomic State Machine**: Lock-free, atomic transitions for session states (`Created → Connecting → Active → Closing → Closed`) ensure high performance and prevent deadlocks.
+- **🧹 Automatic Cleanup**: Idle sessions are automatically detected and cleaned up, preventing resource leaks.
+- **🛡️ Robust Security**: From TLS encryption to dynamic origin checks and comprehensive input validation, security is a core design principle.
+- **📊 Rich Observability**: Detailed health checks and metrics endpoints provide deep insight into the system's performance and status.
+
+**👉 For detailed technical information:** [📖 Connection Architecture](ws/connection/)
 
 ## 🚀 Quick Start
 
@@ -154,6 +166,7 @@ docker run -d --name webssh-bridge -p 8443:8443 \
 UWSB_CONN_TIMEOUT="60s"                            # Connection timeout
 UWSB_CONN_MAX_TOTAL=2000                           # Maximum total connections
 UWSB_CONN_MAX_PER_HOST=20                          # Maximum connections per host
+UWSB_SESSION_IDLE_TIMEOUT="5m"                     # Idle session cleanup timeout
 
 # 🏥 Health & Metrics Monitoring
 UWSB_HEALTH_ENABLED=true                           # Enable health check endpoint
@@ -292,8 +305,8 @@ go build -o ubyte-webssh-bridge .
 
 ```
 ubyte-webssh-bridge/
-├── README.md                 # This documentation
-├── LICENSE                   # MIT license
+├── README.md                # This documentation
+├── LICENSE                  # MIT license
 ├── Dockerfile               # Docker configuration
 ├── frontend/                # Web interface [📖](frontend/)
 ├── nginx/                   # Reverse proxy config [📖](nginx/)

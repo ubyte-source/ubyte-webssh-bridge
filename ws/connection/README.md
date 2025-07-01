@@ -1,82 +1,90 @@
-# Connection Management
+# Connection Module Architecture
 
-This package handles all WebSocket-SSH bridge connections, managing session lifecycles, connection limits, and resource cleanup.
+The Connection module manages WebSocket-to-SSH bridge sessions with a **high-performance, engineering-focused architecture**. The design emphasizes centralized state management and modern concurrency patterns to ensure robustness and scalability.
 
-## 🏗️ Architecture
+## 🏗️ Core Architecture
 
 ```mermaid
 graph TB
+    subgraph "State Machine Core"
+        SM["SessionStateMachine"]
+        States["CREATED → CONNECTING → ACTIVE → CLOSING → CLOSED"]
+        Atomic["Atomic Transitions"]
+    end
+
+    subgraph "Session Management"
+        Session["BridgeSession"]
+        Context["Context Cancellation"]
+    end
+    subgraph "Session Management"
+        Session["BridgeSession"]
+        Context["Context Cancellation"]
+    end
+
     subgraph "Connection Manager"
         Manager["ConnectionManager"]
-        Sessions["Active Sessions Map"]
-        HostTrack["Host Connection Tracking"]
+        Sessions["Active Sessions"]
+        Limits["Connection Limits"]
         Stats["Statistics"]
     end
 
-    subgraph "Bridge Session"
-        Session["BridgeSession"]
-        WSConn["WebSocket Connection"]
-        SSHConn["SSH Connection"]
-        MsgProc["Message Processor"]
-    end
-
-    subgraph "Session Lifecycle"
-        Create["Create Session"]
-        Init["Initialize SSH"]
-        Comm["Start Communication"]
-        Monitor["Monitor Activity"]
-        Cleanup["Cleanup Resources"]
-    end
-
+    SM --> Session
+    Atomic --> SM
+    States --> SM
+    Session --> Context
     Manager --> Sessions
-    Manager --> HostTrack
+    Manager --> Limits
     Manager --> Stats
-    Manager --> Create
-    Create --> Session
-    Session --> WSConn
-    Session --> SSHConn
-    Session --> MsgProc
-    Create --> Init
-    Init --> Comm
-    Comm --> Monitor
-    Monitor --> Cleanup
 ```
 
-## 🔧 Core Components
+## 🔧 Key Components
 
-### Connection Manager
+### 1. SessionStateMachine
 
-The main orchestrator for all connection-related operations:
+**Centralized state management with atomic operations:**
 
 ```go
-type ConnectionManager struct {
-    // Configuration
-    config *config.Configuration
-    logger *logrus.Logger
+type SessionStateMachine struct {
+    state int32 // Atomic operations on int32
+}
 
-    // Session management
-    activeSessions map[string]*BridgeSession
-    sessionsMutex  sync.RWMutex
+type SessionState int32
 
-    // Host connection tracking
-    hostConnections map[string]int
-    hostMutex       sync.RWMutex
+const (
+    StateCreated SessionState = iota
+    StateConnecting
+    StateActive
+    StateClosing
+    StateClosed
+)
+```
 
-    // Statistics
-    totalSessions      int64
-    successfulSessions int64
-    failedSessions     int64
-    statsMutex         sync.RWMutex
+**Atomic state transitions:**
+
+```go
+func (sm *SessionStateMachine) TransitionTo(newState SessionState) bool {
+    for {
+        currentState := SessionState(atomic.LoadInt32(&sm.state))
+
+        if !currentState.IsValidTransition(newState) {
+            return false
+        }
+
+        if atomic.CompareAndSwapInt32(&sm.state, int32(currentState), int32(newState)) {
+            return true
+        }
+        // Retry if CAS failed due to concurrent modification
+    }
 }
 ```
 
-### Bridge Session
+### 2. BridgeSession
 
-Individual WebSocket-SSH bridge session:
+The `BridgeSession` struct represents a single WebSocket-to-SSH connection and its associated state.
 
 ```go
 type BridgeSession struct {
-    // Identification
+    // Core identification
     ID            string
     TargetAddress string
     ClientIP      string
@@ -86,619 +94,293 @@ type BridgeSession struct {
     SSHClient     *ssh.SSHClient
     SSHSession    *ssh.SSHSession
 
-    // Message processing
-    MessageProcessor *message.MessageProcessor
-
-    // Context and synchronization
+    // Synchronization and State
+    stateMachine *SessionStateMachine  // Atomic state management
     Context    context.Context
     CancelFunc context.CancelFunc
     WaitGroup  *sync.WaitGroup
 
-    // Connection state
-    IsActive     bool
-    IsClosed     bool
+    // Timestamps
     CreatedAt    time.Time
-    LastActivity time.Time
+    lastActivity int64 // Unix timestamp
 
-    // Logger
     Logger *logrus.Logger
 }
 ```
 
-## 🔄 Session Lifecycle
-
-### Session Creation Flow
+### 3. State Transition Flow
 
 ```mermaid
-sequenceDiagram
-    participant Client
-    participant ConnMgr
-    participant Session
-    participant SSH
-    participant WSConn
-
-    Client->>ConnMgr: Request WebSocket Connection
-    ConnMgr->>ConnMgr: Check Global Connection Limit
-    ConnMgr->>ConnMgr: Check Per-Host Connection Limit
-    ConnMgr->>ConnMgr: Generate Session ID
-    ConnMgr->>Session: Create New Session
-    ConnMgr->>WSConn: Configure WebSocket
-    ConnMgr->>ConnMgr: Add to Active Sessions
-    ConnMgr->>ConnMgr: Update Host Connection Count
-
-    Client->>Session: Send SSH Credentials
-    Session->>SSH: Initialize SSH Connection
-    SSH->>Session: SSH Connection Established
-    Session->>Session: Start Communication Goroutines
-
-    loop Session Active
-        Client->>Session: Terminal Input
-        Session->>SSH: Forward to SSH
-        SSH->>Session: SSH Output
-        Session->>Client: Forward to WebSocket
-    end
-
-    Session->>ConnMgr: Session Completed
-    ConnMgr->>ConnMgr: Remove from Active Sessions
-    ConnMgr->>ConnMgr: Update Statistics
-    ConnMgr->>Session: Cleanup Resources
+stateDiagram-v2
+    [*] --> CREATED: NewSession()
+    CREATED --> CONNECTING: StartCommunication()
+    CREATED --> CLOSING: Close()
+    CONNECTING --> ACTIVE: SSH Connected
+    CONNECTING --> CLOSING: Connection Failed
+    ACTIVE --> CLOSING: Close() / Error
+    CLOSING --> CLOSED: Resources Released
+    CLOSED --> [*]
 ```
 
-### Session Management Methods
+## 🔄 Operations
 
-#### Creating Sessions
+### Thread-Safe Message Writing
 
 ```go
-func (manager *ConnectionManager) CreateSession(webSocketConn *websocket.Conn, targetAddress string, clientIP string) (*BridgeSession, error) {
-    // Check global connection limit
-    if err := manager.checkGlobalConnectionLimit(); err != nil {
-        return nil, err
-    }
+func (s *BridgeSession) safeWriteWebSocketMessage(messageType int, data []byte) error {
+	if s.stateMachine.IsClosed() {
+		return fmt.Errorf("connection is closed")
+	}
 
-    // Check per-host connection limit
-    if err := manager.checkHostConnectionLimit(targetAddress); err != nil {
-        return nil, err
-    }
+	dataCopy := s.bufferPool.GetCopy(data)
+	msg := s.messagePool.GetWSMessage(messageType, dataCopy)
 
-    // Generate unique session ID
-    sessionID, err := manager.generateSessionID()
-    if err != nil {
-        return nil, fmt.Errorf("failed to generate session ID: %v", err)
-    }
-
-    // Create new session
-    session := NewBridgeSession(sessionID, webSocketConn, targetAddress, clientIP, manager.logger)
-
-    // Configure WebSocket
-    if err := manager.configureWebSocket(webSocketConn); err != nil {
-        return nil, fmt.Errorf("failed to configure WebSocket: %v", err)
-    }
-
-    // Add to active sessions
-    manager.sessionsMutex.Lock()
-    manager.activeSessions[sessionID] = session
-    manager.sessionsMutex.Unlock()
-
-    // Update host connection count
-    manager.hostMutex.Lock()
-    manager.hostConnections[targetAddress]++
-    manager.hostMutex.Unlock()
-
-    return session, nil
+	select {
+	case s.wsWriteChan <- msg:
+		return nil
+	case <-time.After(5 * time.Second):
+		s.bufferPool.Put(dataCopy)
+		s.messagePool.PutWSMessage(msg)
+		return fmt.Errorf("WebSocket write channel blocked")
+	case <-s.Context.Done():
+		s.bufferPool.Put(dataCopy)
+		s.messagePool.PutWSMessage(msg)
+		return fmt.Errorf("session closed")
+	}
 }
 ```
 
-#### Initializing SSH Connections
+### Graceful Shutdown
 
 ```go
-func (manager *ConnectionManager) InitializeSession(session *BridgeSession, credentials message.Credentials) error {
-    // Create SSH timeouts from configuration
-    timeouts := ssh.NewSSHTimeouts(
-        manager.config.SSHConnectTimeout,
-        manager.config.SSHAuthTimeout,
-        manager.config.SSHHandshakeTimeout,
-    )
+func (s *BridgeSession) Close() error {
+	if s.stateMachine.IsClosed() {
+		return nil
+	}
 
-    // Initialize SSH connection
-    if err := session.InitializeSSHConnection(credentials, timeouts); err != nil {
-        manager.handleSessionFailure(session, err)
-        return fmt.Errorf("failed to initialize SSH connection: %v", err)
-    }
+	s.initiateShutdown()
+	s.WaitGroup.Wait()
 
-    // Start communication
-    if err := session.StartCommunication(); err != nil {
-        manager.handleSessionFailure(session, err)
-        return fmt.Errorf("failed to start communication: %v", err)
-    }
+	// ... sequential cleanup logic ...
 
-    // Update statistics
-    manager.statsMutex.Lock()
-    manager.successfulSessions++
-    manager.statsMutex.Unlock()
-
-    return nil
+	s.stateMachine.TransitionTo(StateClosed)
+	return finalErr
 }
 ```
 
-## 🔐 Connection Limits & Security
+## 🧪 State Machine Testing
 
-### Global Connection Limits
+### Atomic Operations Test
 
 ```go
-func (manager *ConnectionManager) checkGlobalConnectionLimit() error {
-    if manager.GetActiveSessionCount() >= manager.config.MaxConnections {
-        return fmt.Errorf("maximum number of connections (%d) reached", manager.config.MaxConnections)
+func TestSessionStateMachineConcurrency(t *testing.T) {
+    sm := NewSessionStateMachine()
+    const numGoroutines = 100
+
+    var wg sync.WaitGroup
+    successCount := make(chan bool, numGoroutines)
+
+    // Many goroutines try to transition simultaneously
+    for i := 0; i < numGoroutines; i++ {
+        wg.Add(1)
+        go func() {
+            defer wg.Done()
+            success := sm.TransitionTo(StateConnecting)
+            successCount <- success
+        }()
     }
-    return nil
+
+    wg.Wait()
+
+    // Only ONE should succeed due to atomic operations
+    successes := 0
+    for success := range successCount {
+        if success { successes++ }
+    }
+
+    assert.Equal(t, 1, successes) // Exactly one successful transition
 }
 ```
 
-### Per-Host Connection Limits
+### Valid Transition Logic
 
 ```go
-func (manager *ConnectionManager) checkHostConnectionLimit(targetAddress string) error {
-    hostCount := manager.GetHostConnectionCount(targetAddress)
-    if hostCount >= manager.config.MaxConnectionsPerHost {
-        return fmt.Errorf("maximum number of connections to host %s (%d) reached", targetAddress, manager.config.MaxConnectionsPerHost)
-    }
-    return nil
-}
-```
-
-### IP Detection and Security
-
-```go
-func (manager *ConnectionManager) GetClientIP(request *http.Request) string {
-    // Check for X-Forwarded-For header first (load balancer)
-    if xff := request.Header.Get("X-Forwarded-For"); xff != "" {
-        if ips := strings.Split(xff, ","); len(ips) > 0 {
-            return strings.TrimSpace(ips[0])
-        }
+func TestSessionStateValidTransitions(t *testing.T) {
+    validTransitions := map[SessionState][]SessionState{
+        StateCreated:    {StateConnecting, StateClosing},
+        StateConnecting: {StateActive, StateClosing},
+        StateActive:     {StateClosing},
+        StateClosing:    {StateClosed},
+        StateClosed:     {}, // No transitions from closed
     }
 
-    // Check for X-Real-IP header (reverse proxy)
-    if xri := request.Header.Get("X-Real-IP"); xri != "" {
-        return xri
-    }
-
-    // Fall back to RemoteAddr
-    if host, _, err := net.SplitHostPort(request.RemoteAddr); err == nil {
-        return host
-    }
-
-    return request.RemoteAddr
-}
-```
-
-## 📨 Communication Handling
-
-### WebSocket Message Processing
-
-```go
-func (session *BridgeSession) handleWebSocketMessages() {
-    defer session.WaitGroup.Done()
-    defer func() {
-        if stdinPipe := session.SSHSession.GetStdinPipe(); stdinPipe != nil {
-            stdinPipe.Close()
-        }
-    }()
-
-    for {
-        select {
-        case <-session.Context.Done():
-            return
-        default:
-        }
-
-        messageType, reader, err := session.readNextWebSocketFrame()
-        if err != nil {
-            session.Logger.Errorf("WebSocket frame error: %v", err)
-            return
-        }
-
-        session.updateLastActivity()
-
-        if err := session.processWebSocketMessage(messageType, reader); err != nil {
-            session.Logger.Errorf("Message processing error: %v", err)
-            return
+    // Test all valid transitions
+    for fromState, validToStates := range validTransitions {
+        for _, toState := range validToStates {
+            assert.True(t, fromState.IsValidTransition(toState))
         }
     }
 }
 ```
 
-### SSH Output Handling
+## 🔍 Architectural Benefits
+
+### 1. **High Performance**
+
+- **Atomic Operations**: Lock-free state checks and transitions minimize contention and improve performance.
+- **Channel-Based Coordination**: The connection manager uses a single coordinator goroutine to manage state, eliminating the need for widespread locking.
+
+### 2. **Reliability and Maintainability**
+
+- **Centralized State**: The `SessionStateMachine` provides a single source of truth for the session's state.
+- **Simplified Concurrency**: The use of atomic operations and channels makes the code easier to reason about and less prone to race conditions.
+- **Clear Lifecycle**: The session lifecycle is clearly defined and enforced by the state machine.
+
+## 🔒 Thread Safety Guarantees
+
+### Atomic State Management
+
+- **Lock-free** state checks for read operations
+- **Compare-and-swap** for atomic state transitions
+- **Memory ordering** guarantees through atomic package
+
+### Single Mutex Strategy
+
+- **Clear ownership** of protected data
+- **Reduced deadlock risk** with single lock
+- **Consistent locking order** across operations
+
+## 📖 Usage Examples
+
+### Creating Sessions with State Management
 
 ```go
-func (session *BridgeSession) handleSSHOutput() {
-    defer session.WaitGroup.Done()
+// Session automatically starts in StateCreated
+session := NewBridgeSession(id, wsConn, target, clientIP, logger)
 
-    stdoutPipe := session.SSHSession.GetStdoutPipe()
-    buffer := make([]byte, 8192)
-
-    for {
-        select {
-        case <-session.Context.Done():
-            return
-        default:
-        }
-
-        n, err := stdoutPipe.Read(buffer)
-        if n > 0 {
-            if writeErr := session.safeWriteWebSocketMessage(int(message.BinaryMessageType), buffer[:n]); writeErr != nil {
-                session.Logger.Errorf("Error writing SSH output to WebSocket: %v", writeErr)
-                return
-            }
-            session.updateLastActivity()
-        }
-
-        if err != nil {
-            if err != io.EOF {
-                session.Logger.Errorf("Error reading SSH stdout: %v", err)
-            }
-            return
-        }
-    }
+// Atomic transition to connecting
+if !session.stateMachine.TransitionTo(StateConnecting) {
+    return fmt.Errorf("invalid state transition")
 }
+
+// Start communication bridges
+if err := session.StartCommunication(); err != nil {
+    return err
+}
+
+// Automatic transition to active state
+// Session is now fully operational
 ```
 
-### Keep-Alive Mechanism
+### Safe Operations During Session Lifecycle
 
 ```go
-func (session *BridgeSession) sendKeepAlive() {
-    defer session.WaitGroup.Done()
+// Fast state check without locking
+if session.stateMachine.IsActive() {
+    // Process messages
+    session.processMessage(data)
+}
 
-    ticker := time.NewTicker(30 * time.Second)
-    defer ticker.Stop()
-
-    for {
-        select {
-        case <-session.Context.Done():
-            return
-        case <-ticker.C:
-            if err := session.safeWriteWebSocketMessage(int(message.PingMessageType), nil); err != nil {
-                session.Logger.Errorf("Error sending ping: %v", err)
-                return
-            }
-        }
-    }
+// Graceful shutdown with state machine
+if session.stateMachine.CanClose() {
+    session.Close()
 }
 ```
 
 ## 🧹 Resource Management
 
-### Session Cleanup
+### Simplified Cleanup
 
 ```go
-func (session *BridgeSession) Close() error {
-    // Cancel context to stop all goroutines
-    if session.CancelFunc != nil {
-        session.CancelFunc()
+func (s *BridgeSession) Close() error {
+    // Check if already closed (atomic)
+    if s.stateMachine.IsClosed() {
+        return nil
     }
 
-    // Wait for all goroutines to finish
-    if session.WaitGroup != nil {
-        session.WaitGroup.Wait()
+    // Initiate shutdown (atomic transition)
+    s.initiateShutdown()
+
+    // Wait for goroutines to finish
+    s.WaitGroup.Wait()
+
+    // Sequential cleanup with error aggregation
+    var finalErr error
+
+    if err := s.safeCloseSSHSession(); err != nil {
+        finalErr = err
     }
 
-    // Close SSH session
-    if session.SSHSession != nil {
-        session.SSHSession.Close()
+    if err := s.safeCloseSSHClient(); err != nil && finalErr == nil {
+        finalErr = err
     }
 
-    // Close SSH client
-    if session.SSHClient != nil {
-        session.SSHClient.Close()
+    if err := s.safeCloseWebSocket(); err != nil && finalErr == nil {
+        finalErr = err
     }
 
-    // Close WebSocket
-    session.safeCloseWebSocket()
+    // Final state transition
+    s.stateMachine.TransitionTo(StateClosed)
 
-    session.IsActive = false
-    return nil
+    return finalErr
 }
 ```
 
-### Automatic Cleanup
+## 📈 Future Enhancements
+
+### Metrics Integration
+
+The architecture is designed to be easily extended with more detailed metrics. For example, tracking the duration of each state or the number of state transitions.
 
 ```go
-func (manager *ConnectionManager) startCleanupRoutine() {
-    ticker := time.NewTicker(30 * time.Second)
-    defer ticker.Stop()
-
-    for range ticker.C {
-        manager.cleanupInactiveSessions()
-    }
-}
-
-func (manager *ConnectionManager) cleanupInactiveSessions() {
-    cutoff := time.Now().Add(-manager.config.ConnectionTimeout)
-    var sessionsToRemove []string
-
-    manager.sessionsMutex.RLock()
-    for id, session := range manager.activeSessions {
-        if session.LastActivity.Before(cutoff) && !session.IsActive {
-            sessionsToRemove = append(sessionsToRemove, id)
-        }
-    }
-    manager.sessionsMutex.RUnlock()
-
-    for _, sessionID := range sessionsToRemove {
-        manager.logger.Infof("Cleaning up inactive session %s", sessionID)
-        manager.RemoveSession(sessionID)
-    }
-}
-```
-
-## 📊 Statistics and Monitoring
-
-### Session Statistics
-
-```go
-func (manager *ConnectionManager) GetStats() map[string]interface{} {
-    manager.statsMutex.RLock()
-    totalSessions := manager.totalSessions
-    successfulSessions := manager.successfulSessions
-    failedSessions := manager.failedSessions
-    manager.statsMutex.RUnlock()
-
-    activeSessionCount := manager.GetActiveSessionCount()
-
-    manager.hostMutex.RLock()
-    hostStats := make(map[string]int)
-    for host, count := range manager.hostConnections {
-        hostStats[host] = count
-    }
-    manager.hostMutex.RUnlock()
-
+// Example of enhanced statistics
+func (s *BridgeSession) GetStats() map[string]interface{} {
     return map[string]interface{}{
-        "active_sessions":     activeSessionCount,
-        "total_sessions":      totalSessions,
-        "successful_sessions": successfulSessions,
-        "failed_sessions":     failedSessions,
-        "host_connections":    hostStats,
-        "max_connections":     manager.config.MaxConnections,
-        "max_per_host":        manager.config.MaxConnectionsPerHost,
+        "id":             s.ID,
+        "state":          s.stateMachine.GetState().String(),
+        "is_active":      s.stateMachine.IsActive(),
+        "is_closed":      s.stateMachine.IsClosed(),
+        "duration":       time.Since(s.CreatedAt).String(),
+        "last_activity":  s.GetLastActivity(),
     }
-}
-```
-
-### Individual Session Stats
-
-```go
-func (session *BridgeSession) GetStats() map[string]interface{} {
-    session.CloseMutex.RLock()
-    defer session.CloseMutex.RUnlock()
-
-    return map[string]interface{}{
-        "id":             session.ID,
-        "target_address": session.TargetAddress,
-        "client_ip":      session.ClientIP,
-        "is_active":      session.IsActive,
-        "is_closed":      session.IsClosed,
-        "created_at":     session.CreatedAt,
-        "last_activity":  session.LastActivity,
-        "duration":       time.Since(session.CreatedAt).String(),
-    }
-}
-```
-
-## 🔒 Thread Safety
-
-### Safe WebSocket Operations
-
-```go
-func (session *BridgeSession) safeWriteWebSocketMessage(messageType int, data []byte) error {
-    session.WriteMutex.Lock()
-    defer session.WriteMutex.Unlock()
-
-    session.CloseMutex.RLock()
-    if session.IsClosed {
-        session.CloseMutex.RUnlock()
-        return fmt.Errorf("connection is closed")
-    }
-    session.CloseMutex.RUnlock()
-
-    return session.WebSocketConn.WriteMessage(messageType, data)
-}
-
-func (session *BridgeSession) safeCloseWebSocket() error {
-    session.CloseMutex.Lock()
-    defer session.CloseMutex.Unlock()
-
-    if session.IsClosed {
-        return nil // Already closed
-    }
-
-    session.IsClosed = true
-    return session.WebSocketConn.Close()
-}
-```
-
-### Concurrent Session Management
-
-```go
-func (manager *ConnectionManager) GetActiveSessions() map[string]*BridgeSession {
-    manager.sessionsMutex.RLock()
-    defer manager.sessionsMutex.RUnlock()
-
-    sessions := make(map[string]*BridgeSession, len(manager.activeSessions))
-    for id, session := range manager.activeSessions {
-        sessions[id] = session
-    }
-    return sessions
-}
-```
-
-## ⚡ Performance Optimizations
-
-### Session ID Generation
-
-```go
-func (manager *ConnectionManager) generateSessionID() (string, error) {
-    bytes := make([]byte, 16)
-    if _, err := rand.Read(bytes); err != nil {
-        return "", err
-    }
-    return hex.EncodeToString(bytes), nil
-}
-```
-
-### WebSocket Configuration
-
-```go
-func (manager *ConnectionManager) configureWebSocket(webSocketConn *websocket.Conn) error {
-    webSocketConn.SetReadLimit(manager.config.WebSocketReadLimit)
-
-    // Set timeouts
-    webSocketConn.SetReadDeadline(time.Now().Add(manager.config.SSHHandshakeTimeout))
-    webSocketConn.SetWriteDeadline(time.Now().Add(30 * time.Second))
-
-    // Set ping handler
-    webSocketConn.SetPingHandler(func(appData string) error {
-        manager.logger.Debug("Received WebSocket ping, sending pong")
-        return webSocketConn.WriteControl(websocket.PongMessage, nil, time.Now().Add(time.Second))
-    })
-
-    return nil
-}
-```
-
-## 🧪 Testing
-
-### Unit Tests
-
-```go
-func TestConnectionManager_CreateSession(t *testing.T) {
-    cfg := config.DefaultConfiguration()
-    logger := logrus.New()
-    manager := connection.NewConnectionManager(cfg, logger)
-
-    // Mock WebSocket connection
-    webSocketConn := &websocket.Conn{}
-
-    session, err := manager.CreateSession(webSocketConn, "localhost:22", "127.0.0.1")
-
-    assert.NoError(t, err)
-    assert.NotNil(t, session)
-    assert.Equal(t, "localhost:22", session.TargetAddress)
-    assert.Equal(t, "127.0.0.1", session.ClientIP)
-}
-
-func TestConnectionManager_ConnectionLimits(t *testing.T) {
-    cfg := config.DefaultConfiguration()
-    cfg.MaxConnections = 1
-    logger := logrus.New()
-    manager := connection.NewConnectionManager(cfg, logger)
-
-    // Create first session (should succeed)
-    session1, err := manager.CreateSession(&websocket.Conn{}, "host1:22", "127.0.0.1")
-    assert.NoError(t, err)
-    assert.NotNil(t, session1)
-
-    // Create second session (should fail due to limit)
-    session2, err := manager.CreateSession(&websocket.Conn{}, "host2:22", "127.0.0.1")
-    assert.Error(t, err)
-    assert.Nil(t, session2)
-    assert.Contains(t, err.Error(), "maximum number of connections")
-}
-```
-
-### Integration Tests
-
-```go
-func TestBridgeSession_Lifecycle(t *testing.T) {
-    session := connection.NewBridgeSession("test-id", nil, "localhost:22", "127.0.0.1", nil)
-
-    // Test initial state
-    assert.Equal(t, "test-id", session.ID)
-    assert.Equal(t, "localhost:22", session.TargetAddress)
-    assert.False(t, session.IsActive)
-    assert.False(t, session.IsClosed)
-
-    // Test state changes
-    session.IsActive = true
-    assert.True(t, session.IsActive)
-
-    // Test cleanup
-    err := session.Close()
-    assert.NoError(t, err)
-    assert.False(t, session.IsActive)
 }
 ```
 
 ## 🔍 Troubleshooting
 
+### State Machine Debugging
+
+```go
+// Enable state transition logging
+func (sm *SessionStateMachine) TransitionTo(newState SessionState) bool {
+    currentState := sm.GetState()
+    success := sm.transitionToInternal(newState)
+
+    if success {
+        log.Debugf("State transition: %s → %s", currentState, newState)
+    } else {
+        log.Warnf("Invalid transition: %s → %s", currentState, newState)
+    }
+
+    return success
+}
+```
+
 ### Common Issues
 
-#### Session Creation Failures
-
-- **Connection Limit Reached**: Check global and per-host limits
-- **WebSocket Configuration Error**: Verify WebSocket settings
-- **Session ID Generation**: Ensure proper random number generation
-
-#### Communication Issues
-
-- **WebSocket Write Errors**: Check connection state and thread safety
-- **SSH Connection Lost**: Implement proper error handling and reconnection
-- **Message Processing Errors**: Validate message types and content
-
-#### Resource Leaks
-
-- **Unclosed Sessions**: Ensure proper cleanup in error scenarios
-- **Goroutine Leaks**: Verify context cancellation and WaitGroup usage
-- **Memory Leaks**: Monitor session maps and implement cleanup routines
-
-### Debug Logging
-
-```go
-// Enable debug logging for detailed session tracking
-session.Logger.Debugf("Session %s: WebSocket message type %d, size %d",
-    session.ID, messageType, len(data))
-
-session.Logger.Debugf("Session %s: SSH output %d bytes",
-    session.ID, n)
-
-session.Logger.Debugf("Session %s: Last activity updated",
-    session.ID)
-```
-
-## 📖 Configuration Examples
-
-### High-Performance Configuration
-
-```go
-cfg := config.DefaultConfiguration()
-cfg.MaxConnections = 50000
-cfg.MaxConnectionsPerHost = 1000
-cfg.ConnectionTimeout = 120 * time.Second
-cfg.WebSocketReadBufferSize = 32768
-cfg.WebSocketWriteBufferSize = 32768
-```
-
-### Security-Focused Configuration
-
-```go
-cfg := config.DefaultConfiguration()
-cfg.MaxConnections = 1000
-cfg.MaxConnectionsPerHost = 10
-cfg.ConnectionTimeout = 30 * time.Second
-cfg.SSHAuthTimeout = 45 * time.Second
-```
-
-### Development Configuration
-
-```go
-cfg := config.DefaultConfiguration()
-cfg.MaxConnections = 10
-cfg.MaxConnectionsPerHost = 2
-cfg.ConnectionTimeout = 10 * time.Second
-cfg.DebugMode = true
-```
+1. **Invalid State Transitions**: Check state machine flow
+2. **Stuck Sessions**: Monitor state progression
+3. **Resource Leaks**: Verify context cancellation
 
 ## 📖 Related Documentation
 
-- [Configuration Management](../config/README.md) - Connection limits and timeouts
-- [Server Implementation](../server/README.md) - WebSocket handling
-- [SSH Client](../ssh/README.md) - SSH connection management
-- [Message Processing](../message/README.md) - WebSocket message handling
-- [Rate Limiting](../utils/README.md) - Connection rate limiting
+- [State Machine Implementation](./state.go) - Core state management
+- [Session Management](./session.go) - Simplified session logic
+- [Connection Manager](./manager.go) - Session orchestration
+- [Testing](./state_test.go) - State machine test suite
+- [Server Integration](../server/) - WebSocket handling
+- [SSH Client](../ssh/) - SSH connection management
+
+---
+
+**Key Takeaway**: The architecture of the connection module is designed for high performance, reliability, and maintainability, using modern Go concurrency patterns to manage the lifecycle of WebSocket-to-SSH sessions.

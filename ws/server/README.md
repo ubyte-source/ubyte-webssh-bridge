@@ -118,12 +118,14 @@ The server expects WebSocket connections in the format:
 Example URL parsing:
 
 ```go
+var targetAddressRegex = regexp.MustCompile(`^/ws/([^/]+)/(\d+)$`)
+
 func (manager *ConnectionManager) ParseTargetAddress(request *http.Request) (string, error) {
-    pathParts := strings.Split(request.URL.Path, "/")
-    if len(pathParts) < 4 {
-        return "", fmt.Errorf("URL does not contain valid host and port")
-    }
-    return pathParts[2] + ":" + pathParts[3], nil
+	matches := targetAddressRegex.FindStringSubmatch(request.URL.Path)
+	if len(matches) != 3 {
+		return "", fmt.Errorf("URL path does not match expected format /ws/{host}/{port}")
+	}
+	return net.JoinHostPort(matches[1], matches[2]), nil
 }
 ```
 
@@ -509,8 +511,8 @@ cfg.RateLimitWhitelist = []string{"10.0.0.0/8"} // Internal LB network
 
 ## 📖 Related Documentation
 
-- [Configuration Management](../config/README.md) - Server configuration options
-- [Connection Management](../connection/README.md) - Session handling
-- [Message Processing](../message/README.md) - WebSocket message handling
-- [Rate Limiting](../utils/README.md) - Rate limiting implementation
-- [Frontend Interface](../../frontend/README.md) - Web client documentation
+- [Configuration Management](../config/) - Server configuration options
+- [Connection Management](../connection/) - Session handling
+- [Message Processing](../message/) - WebSocket message handling
+- [Rate Limiting](../utils/) - Rate limiting implementation
+- [Frontend Interface](../../frontend/) - Web client documentation

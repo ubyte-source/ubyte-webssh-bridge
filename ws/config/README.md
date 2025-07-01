@@ -58,6 +58,7 @@ ShutdownTimeout time.Duration // Graceful shutdown timeout (default: 30s)
 MaxConnections        int           // Global connection limit (default: 1000)
 MaxConnectionsPerHost int           // Per-host connection limit (default: 10)
 ConnectionTimeout     time.Duration // Connection timeout (default: 30s)
+SessionIdleTimeout    time.Duration // Idle session cleanup timeout (default: 5m)
 ```
 
 ### SSH Settings
@@ -325,7 +326,7 @@ func (c *Configuration) Validate() error {
 
 ## 📖 Related Documentation
 
-- [Server Configuration](../server/README.md) - HTTP/WebSocket server setup
-- [Connection Management](../connection/README.md) - Connection handling
-- [SSH Configuration](../ssh/README.md) - SSH client settings
-- [Rate Limiting](../utils/README.md) - Rate limiting configuration
+- [Server Configuration](../server/) - HTTP/WebSocket server setup
+- [Connection Management](../connection/) - Connection handling
+- [SSH Configuration](../ssh/) - SSH client settings
+- [Rate Limiting](../utils/) - Rate limiting configuration

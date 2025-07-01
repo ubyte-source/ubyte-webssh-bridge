@@ -101,7 +101,7 @@ func (r *HandlerRegistry) HandleAction(session *ssh.Session, action ActionType, 
 		if r.logger != nil {
 			r.logger.Debugf("Unknown action: %s", action)
 		}
-		return fmt.Errorf("unknown action: %s", action)
+		return fmt.Errorf("%s: %s", ErrMsgUnknownAction, action)
 	}
 	return handler.Handle(session, messageData)
 }

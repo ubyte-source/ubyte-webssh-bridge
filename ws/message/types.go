@@ -47,3 +47,8 @@ const (
 	// PingAction identifies a keep-alive ping command.
 	PingAction ActionType = "ping"
 )
+
+// Error message constants
+const (
+	ErrMsgUnknownAction = "unknown action"
+)

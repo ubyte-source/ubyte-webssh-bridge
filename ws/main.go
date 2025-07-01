@@ -169,12 +169,17 @@ func applyConfig(cfg *config.Configuration) {
 		} else {
 			value = os.Getenv(envKey)
 		}
-		if value != "" {
-			if parsed, err := time.ParseDuration(value); err == nil {
-				return parsed
-			}
+
+		if value == "" {
+			return fallback
 		}
-		return fallback
+
+		parsed, err := time.ParseDuration(value)
+		if err != nil {
+			return fallback
+		}
+
+		return parsed
 	}
 
 	// getStringSlice retrieves a slice of strings, preferring the flag over the environment variable.
@@ -185,10 +190,12 @@ func applyConfig(cfg *config.Configuration) {
 		} else {
 			value = os.Getenv(envKey)
 		}
-		if value != "" {
-			return strings.Split(strings.TrimSpace(value), ",")
+
+		if value == "" {
+			return fallback
 		}
-		return fallback
+
+		return strings.Split(strings.TrimSpace(value), ",")
 	}
 
 	// Populate the configuration struct

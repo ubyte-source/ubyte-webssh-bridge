@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -13,9 +14,24 @@ import (
 	"github.com/ubyte-source/ubyte-webssh-bridge/ssh"
 )
 
-// BridgeSession represents a single, managed WebSocket-to-SSH connection.
-// It contains all necessary state for the session, including connections,
-// synchronization primitives, and metadata.
+// Error patterns for connection close error handling
+const (
+	ErrClosedNetworkConnection = "use of closed network connection"
+	ErrBrokenPipe              = "broken pipe"
+	ErrConnectionReset         = "connection reset by peer"
+	ErrWebSocketCloseSent      = "websocket: close sent"
+	ErrEOF                     = "EOF"
+)
+
+// Error patterns for fatal error classification
+const (
+	ErrUnmarshalError            = "error unmarshalling"
+	ErrInvalidTerminalDimensions = "invalid terminal dimensions"
+	ErrCannotResizeTerminal      = "cannot resize terminal"
+)
+
+// BridgeSession represents a single, managed WebSocket-to-SSH connection
+// using channel-based communication for thread-safe operations.
 type BridgeSession struct {
 	ID            string
 	TargetAddress string
@@ -31,23 +47,29 @@ type BridgeSession struct {
 	CancelFunc context.CancelFunc
 	WaitGroup  *sync.WaitGroup
 
-	WriteMutex sync.Mutex
+	// Channel-based communication system
+	stateMachine *SessionStateMachine
+	wsWriteChan  chan *WSMessage     // Channel for WebSocket writes
+	controlChan  chan *ControlSignal // Channel for control operations
+	shutdownChan chan struct{}       // Channel for shutdown signaling
 
-	IsActive     bool
-	IsClosed     bool
-	CloseMutex   sync.RWMutex
+	// Memory pools for allocation optimization
+	bufferPool  *BufferPool
+	messagePool *MessagePool
+
 	CreatedAt    time.Time
-	LastActivity time.Time
+	lastActivity int64 // Unix timestamp for atomic updates
 
 	Logger *logrus.Logger
 }
 
-// NewBridgeSession creates and initializes a new BridgeSession.
+// NewBridgeSession creates and initializes a new BridgeSession
+// with channel-based communication and memory pool optimization.
 func NewBridgeSession(id string, webSocketConn *websocket.Conn, targetAddress, clientIP string, logger *logrus.Logger) *BridgeSession {
 	ctx, cancel := context.WithCancel(context.Background())
 	now := time.Now()
 
-	return &BridgeSession{
+	session := &BridgeSession{
 		ID:               id,
 		TargetAddress:    targetAddress,
 		ClientIP:         clientIP,
@@ -56,12 +78,25 @@ func NewBridgeSession(id string, webSocketConn *websocket.Conn, targetAddress, c
 		Context:          ctx,
 		CancelFunc:       cancel,
 		WaitGroup:        &sync.WaitGroup{},
-		IsActive:         false,
-		IsClosed:         false,
-		CreatedAt:        now,
-		LastActivity:     now,
-		Logger:           logger,
+		stateMachine:     NewSessionStateMachine(),
+
+		wsWriteChan:  make(chan *WSMessage, 100),
+		controlChan:  make(chan *ControlSignal, 10),
+		shutdownChan: make(chan struct{}),
+
+		bufferPool:  NewBufferPool(),
+		messagePool: NewMessagePool(),
+
+		CreatedAt: now,
+		Logger:    logger,
 	}
+	atomic.StoreInt64(&session.lastActivity, now.Unix())
+
+	session.WaitGroup.Add(2)
+	go session.wsWriterLoop()
+	go session.controlHandler()
+
+	return session
 }
 
 // InitializeSSHConnection establishes the underlying SSH connection for the session.
@@ -91,6 +126,11 @@ func (s *BridgeSession) StartCommunication() error {
 		return fmt.Errorf("SSH session not initialized")
 	}
 
+	// Transition to connecting state
+	if !s.stateMachine.TransitionTo(StateConnecting) {
+		return fmt.Errorf("invalid state transition to connecting")
+	}
+
 	s.WaitGroup.Add(3)
 	go s.handleWebSocketMessages()
 	go s.handleSSHOutput()
@@ -101,7 +141,11 @@ func (s *BridgeSession) StartCommunication() error {
 		return fmt.Errorf("failed to start SSH shell: %v", err)
 	}
 
-	s.IsActive = true
+	// Transition to active state
+	if !s.stateMachine.TransitionTo(StateActive) {
+		return fmt.Errorf("invalid state transition to active")
+	}
+
 	s.updateLastActivity()
 	s.Logger.Infof("Bridge session %s started successfully", s.ID)
 	return nil
@@ -128,7 +172,11 @@ func (s *BridgeSession) handleWebSocketMessages() {
 
 		messageType, reader, err := s.readNextWebSocketFrame()
 		if err != nil {
-			s.Logger.Errorf("WebSocket frame error: %v", err)
+			if !s.isAcceptableCloseError(err) {
+				s.Logger.Errorf("WebSocket frame error: %v", err)
+			} else {
+				s.Logger.Debugf("WebSocket closed normally: %v", err)
+			}
 			return
 		}
 
@@ -163,9 +211,8 @@ func (s *BridgeSession) readNextWebSocketFrame() (int, io.Reader, error) {
 		select {
 		case resultChan <- result{msgType, r, err}:
 		case <-s.Context.Done():
-			if err := s.safeCloseWebSocket(); err != nil {
-				s.Logger.Errorf("Failed to close WebSocket in readNextWebSocketFrame: %v", err)
-			}
+			// Context was cancelled, just exit the goroutine
+			// The main Close() method will handle connection cleanup
 		}
 	}()
 
@@ -213,9 +260,10 @@ func (s *BridgeSession) handleSSHOutput() {
 		n, err := stdout.Read(buffer)
 		if n > 0 {
 			if writeErr := s.safeWriteWebSocketMessage(websocket.BinaryMessage, buffer[:n]); writeErr != nil {
-				s.Logger.Errorf("Error writing SSH output to WebSocket: %v", writeErr)
-				if closeErr := s.safeCloseWebSocket(); closeErr != nil {
-					s.Logger.Errorf("Failed to close WebSocket in handleSSHOutput: %v", closeErr)
+				if !s.isAcceptableCloseError(writeErr) {
+					s.Logger.Errorf("Error writing SSH output to WebSocket: %v", writeErr)
+				} else {
+					s.Logger.Debugf("WebSocket write failed due to connection close: %v", writeErr)
 				}
 				return
 			}
@@ -225,9 +273,8 @@ func (s *BridgeSession) handleSSHOutput() {
 		if err != nil {
 			if err != io.EOF {
 				s.Logger.Errorf("Error reading SSH stdout: %v", err)
-			}
-			if closeErr := s.safeCloseWebSocket(); closeErr != nil {
-				s.Logger.Errorf("Failed to close WebSocket in handleSSHOutput on error: %v", closeErr)
+			} else {
+				s.Logger.Debugf("SSH stdout closed normally (EOF)")
 			}
 			return
 		}
@@ -247,9 +294,10 @@ func (s *BridgeSession) sendKeepAlive() {
 			return
 		case <-ticker.C:
 			if err := s.safeWriteWebSocketMessage(websocket.PingMessage, nil); err != nil {
-				s.Logger.Errorf("Error sending ping: %v", err)
-				if closeErr := s.safeCloseWebSocket(); closeErr != nil {
-					s.Logger.Errorf("Failed to close WebSocket in sendKeepAlive: %v", closeErr)
+				if !s.isAcceptableCloseError(err) {
+					s.Logger.Errorf("Error sending ping: %v", err)
+				} else {
+					s.Logger.Debugf("Ping failed due to connection close: %v", err)
 				}
 				return
 			}
@@ -258,31 +306,113 @@ func (s *BridgeSession) sendKeepAlive() {
 }
 
 // safeWriteWebSocketMessage provides a thread-safe way to write messages
-// to the WebSocket connection.
+// to the WebSocket connection using channel-based communication.
 func (s *BridgeSession) safeWriteWebSocketMessage(messageType int, data []byte) error {
-	s.CloseMutex.RLock()
-	if s.IsClosed {
-		s.CloseMutex.RUnlock()
+	if s.stateMachine.IsClosed() {
 		return fmt.Errorf("connection is closed")
 	}
 
-	s.WriteMutex.Lock()
-	err := s.WebSocketConn.WriteMessage(messageType, data)
-	s.WriteMutex.Unlock()
-	s.CloseMutex.RUnlock()
+	dataCopy := s.bufferPool.GetCopy(data)
+	msg := s.messagePool.GetWSMessage(messageType, dataCopy)
 
-	return err
+	select {
+	case s.wsWriteChan <- msg:
+		return nil
+	case <-time.After(5 * time.Second):
+		s.bufferPool.Put(dataCopy)
+		s.messagePool.PutWSMessage(msg)
+		return fmt.Errorf("WebSocket write channel blocked")
+	case <-s.Context.Done():
+		s.bufferPool.Put(dataCopy)
+		s.messagePool.PutWSMessage(msg)
+		return fmt.Errorf("session closed")
+	}
 }
 
 // safeCloseWebSocket provides a thread-safe way to close the WebSocket connection.
 func (s *BridgeSession) safeCloseWebSocket() error {
-	s.CloseMutex.Lock()
-	defer s.CloseMutex.Unlock()
-	if s.IsClosed {
-		return nil // Already closed
+	if s.WebSocketConn == nil {
+		return nil
 	}
-	s.IsClosed = true
-	return s.WebSocketConn.Close()
+
+	closeErr := s.WebSocketConn.Close()
+	if closeErr != nil && s.isAcceptableCloseError(closeErr) {
+		// Log but don't propagate acceptable close errors
+		s.Logger.Debugf("WebSocket close returned acceptable error: %v", closeErr)
+		closeErr = nil
+	}
+
+	return closeErr
+}
+
+// isAcceptableCloseError checks if an error is expected during connection close
+func (s *BridgeSession) isAcceptableCloseError(err error) bool {
+	if err == nil {
+		return true
+	}
+
+	errStr := err.Error()
+	acceptableErrors := []string{
+		ErrClosedNetworkConnection,
+		ErrBrokenPipe,
+		ErrConnectionReset,
+		ErrWebSocketCloseSent,
+		ErrEOF,
+	}
+
+	for _, acceptableErr := range acceptableErrors {
+		if s.stringContains(errStr, acceptableErr) {
+			return true
+		}
+	}
+	return false
+}
+
+// safeCloseSSHSession provides a thread-safe way to close the SSH session.
+func (s *BridgeSession) safeCloseSSHSession() error {
+	if s.SSHSession == nil {
+		return nil
+	}
+
+	closeErr := s.SSHSession.Close()
+	if closeErr != nil && s.isAcceptableCloseError(closeErr) {
+		// Log but don't propagate acceptable close errors
+		s.Logger.Debugf("SSH session close returned acceptable error: %v", closeErr)
+		closeErr = nil
+	}
+	return closeErr
+}
+
+// safeCloseSSHClient provides a thread-safe way to close the SSH client.
+func (s *BridgeSession) safeCloseSSHClient() error {
+	if s.SSHClient == nil {
+		return nil
+	}
+
+	closeErr := s.SSHClient.Close()
+	if closeErr != nil && s.isAcceptableCloseError(closeErr) {
+		// Log but don't propagate acceptable close errors
+		s.Logger.Debugf("SSH client close returned acceptable error: %v", closeErr)
+		closeErr = nil
+	}
+	return closeErr
+}
+
+// initiateShutdown marks the session for shutdown and cancels the context
+func (s *BridgeSession) initiateShutdown() {
+	if !s.stateMachine.TransitionTo(StateClosing) {
+		// If we can't transition to closing, force it
+		s.stateMachine.ForceTransitionTo(StateClosing)
+	}
+
+	if s.CancelFunc != nil {
+		s.CancelFunc()
+	}
+}
+
+// isShuttingDown checks if the session is in shutdown state
+func (s *BridgeSession) isShuttingDown() bool {
+	return s.stateMachine.IsClosed()
 }
 
 // isFatalError determines if an error should cause the connection to close.
@@ -292,15 +422,13 @@ func (s *BridgeSession) isFatalError(err error) bool {
 		return false
 	}
 
-	// Check for specific non-fatal error patterns using simple string matching
 	errStr := err.Error()
 
-	// Action processing errors are usually non-fatal
 	nonFatalPatterns := []string{
-		"unknown action",
-		"error unmarshalling",
-		"invalid terminal dimensions",
-		"cannot resize terminal",
+		message.ErrMsgUnknownAction,
+		ErrUnmarshalError,
+		ErrInvalidTerminalDimensions,
+		ErrCannotResizeTerminal,
 	}
 
 	for _, pattern := range nonFatalPatterns {
@@ -309,7 +437,6 @@ func (s *BridgeSession) isFatalError(err error) bool {
 		}
 	}
 
-	// All other errors are considered fatal
 	return true
 }
 
@@ -337,9 +464,78 @@ func (s *BridgeSession) stringContains(str, substr string) bool {
 	return false
 }
 
+// wsWriterLoop handles all WebSocket writes through a single goroutine
+// to ensure thread-safe write operations.
+func (s *BridgeSession) wsWriterLoop() {
+	defer s.WaitGroup.Done()
+
+	for {
+		select {
+		case msg := <-s.wsWriteChan:
+			if s.stateMachine.IsClosed() {
+				s.messagePool.PutWSMessage(msg)
+				if msg.Data != nil {
+					s.bufferPool.Put(msg.Data)
+				}
+				return
+			}
+
+			err := s.WebSocketConn.WriteMessage(msg.Type, msg.Data)
+
+			if msg.Data != nil {
+				s.bufferPool.Put(msg.Data)
+			}
+			s.messagePool.PutWSMessage(msg)
+
+			if err != nil && !s.isAcceptableCloseError(err) {
+				s.Logger.Errorf("WebSocket write error: %v", err)
+				return
+			}
+
+		case <-s.shutdownChan:
+			return
+		case <-s.Context.Done():
+			return
+		}
+	}
+}
+
+// controlHandler processes control signals through a dedicated channel.
+func (s *BridgeSession) controlHandler() {
+	defer s.WaitGroup.Done()
+
+	for {
+		select {
+		case ctrl := <-s.controlChan:
+			s.processControlSignal(ctrl)
+			s.messagePool.PutControlSignal(ctrl)
+
+		case <-s.shutdownChan:
+			return
+		case <-s.Context.Done():
+			return
+		}
+	}
+}
+
+// processControlSignal handles different types of control operations.
+func (s *BridgeSession) processControlSignal(ctrl *ControlSignal) {
+	switch ctrl.Type {
+	case ControlUpdateActivity:
+		atomic.StoreInt64(&s.lastActivity, time.Now().Unix())
+	case ControlPing:
+		// Ping is handled by wsWriterLoop
+	case ControlShutdown:
+		s.initiateShutdown()
+	case ControlForceClose:
+		s.stateMachine.ForceTransitionTo(StateClosed)
+	}
+}
+
 // updateLastActivity updates the timestamp of the last recorded activity.
+// Uses atomic operations for thread-safe updates.
 func (s *BridgeSession) updateLastActivity() {
-	s.LastActivity = time.Now()
+	atomic.StoreInt64(&s.lastActivity, time.Now().Unix())
 }
 
 // WaitForCompletion blocks until the SSH session has terminated.
@@ -351,46 +547,82 @@ func (s *BridgeSession) WaitForCompletion() error {
 }
 
 // Close terminates the session and releases all associated resources.
+// Uses state machine to prevent multiple close attempts.
 func (s *BridgeSession) Close() error {
-	if s.CancelFunc != nil {
-		s.CancelFunc()
+	// Check if already closed/closing
+	if s.stateMachine.IsClosed() {
+		return nil
 	}
+
+	s.Logger.Infof("Initiating coordinated shutdown for bridge session %s", s.ID)
+
+	// First, initiate shutdown to cancel context and stop goroutines
+	s.initiateShutdown()
+
+	// Wait for all goroutines to finish
 	if s.WaitGroup != nil {
 		s.WaitGroup.Wait()
 	}
 
-	if s.SSHSession != nil {
-		if err := s.SSHSession.Close(); err != nil {
-			s.Logger.Errorf("Failed to close SSH session: %v", err)
+	var finalErr error
+
+	// Close connections in reverse order of creation
+	// 1. Close SSH session first (application level)
+	if sessionErr := s.safeCloseSSHSession(); sessionErr != nil {
+		s.Logger.Errorf("Error closing SSH session: %v", sessionErr)
+		if finalErr == nil {
+			finalErr = sessionErr
 		}
-	}
-	if s.SSHClient != nil {
-		if err := s.SSHClient.Close(); err != nil {
-			s.Logger.Errorf("Failed to close SSH client: %v", err)
-		}
-	}
-	if err := s.safeCloseWebSocket(); err != nil {
-		s.Logger.Errorf("Failed to close WebSocket: %v", err)
 	}
 
-	s.IsActive = false
-	s.Logger.Infof("Bridge session %s closed", s.ID)
-	return nil
+	// 2. Close SSH client (transport level)
+	if clientErr := s.safeCloseSSHClient(); clientErr != nil {
+		s.Logger.Errorf("Error closing SSH client: %v", clientErr)
+		if finalErr == nil {
+			finalErr = clientErr
+		}
+	}
+
+	// 3. Close WebSocket connection (presentation level)
+	if wsErr := s.safeCloseWebSocket(); wsErr != nil {
+		s.Logger.Errorf("Error closing WebSocket connection: %v", wsErr)
+		if finalErr == nil {
+			finalErr = wsErr
+		}
+	}
+
+	// Transition to closed state
+	s.stateMachine.TransitionTo(StateClosed)
+	s.Logger.Infof("Bridge session %s closed successfully", s.ID)
+
+	return finalErr
 }
 
 // GetStats returns a map of the session's current statistics.
 func (s *BridgeSession) GetStats() map[string]interface{} {
-	s.CloseMutex.RLock()
-	defer s.CloseMutex.RUnlock()
+	state := s.stateMachine.GetState()
+
+	lastActivity := time.Unix(atomic.LoadInt64(&s.lastActivity), 0)
 
 	return map[string]interface{}{
 		"id":             s.ID,
 		"target_address": s.TargetAddress,
 		"client_ip":      s.ClientIP,
-		"is_active":      s.IsActive,
-		"is_closed":      s.IsClosed,
+		"state":          state.String(),
+		"is_active":      s.stateMachine.IsActive(),
+		"is_closed":      s.stateMachine.IsClosed(),
 		"created_at":     s.CreatedAt,
-		"last_activity":  s.LastActivity,
+		"last_activity":  lastActivity,
 		"duration":       time.Since(s.CreatedAt).String(),
 	}
+}
+
+// IsActive returns true if the session is currently active
+func (s *BridgeSession) IsActive() bool {
+	return s.stateMachine.IsActive()
+}
+
+// GetLastActivity returns the time of the last recorded activity.
+func (s *BridgeSession) GetLastActivity() time.Time {
+	return time.Unix(atomic.LoadInt64(&s.lastActivity), 0)
 }

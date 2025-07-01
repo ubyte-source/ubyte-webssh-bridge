@@ -23,6 +23,8 @@ type Configuration struct {
 	MaxConnectionsPerHost int
 	// ConnectionTimeout is the maximum duration for a connection to be idle.
 	ConnectionTimeout time.Duration
+	// SessionIdleTimeout is the maximum duration for a session to be idle before being cleaned up.
+	SessionIdleTimeout time.Duration
 
 	// SSHConnectTimeout is the timeout for establishing the initial SSH connection.
 	SSHConnectTimeout time.Duration
@@ -77,6 +79,7 @@ func DefaultConfiguration() *Configuration {
 		MaxConnections:            1000,
 		MaxConnectionsPerHost:     10,
 		ConnectionTimeout:         30 * time.Second,
+		SessionIdleTimeout:        5 * time.Minute,
 		SSHConnectTimeout:         10 * time.Second,
 		SSHAuthTimeout:            45 * time.Second,
 		SSHHandshakeTimeout:       60 * time.Second,
@@ -110,6 +113,9 @@ func (c *Configuration) Validate() error {
 	}
 	if c.ConnectionTimeout <= 0 {
 		return fmt.Errorf("connection timeout must be positive")
+	}
+	if c.SessionIdleTimeout <= 0 {
+		return fmt.Errorf("session idle timeout must be positive")
 	}
 	if c.SSHConnectTimeout <= 0 {
 		return fmt.Errorf("SSH connect timeout must be positive")

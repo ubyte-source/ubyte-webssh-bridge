@@ -22,7 +22,7 @@ func TestParseTargetAddress(t *testing.T) {
 		{"empty path", "", "", true},
 		{"only ws", "/ws", "", true},
 		{"root path", "/", "", true},
-		{"too many parts", "/ws/host/22/extra", "host:22", false}, // should still work with extra parts
+		{"too many parts", "/ws/host/22/extra", "", true},
 	}
 
 	for _, tt := range tests {
