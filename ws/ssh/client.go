@@ -40,14 +40,30 @@ func NewSSHClient(credentials message.Credentials, address string, timeouts SSHT
 		Timeout:         timeouts.AuthTimeout,
 		Config: ssh.Config{
 			KeyExchanges: []string{
+				// Modern algorithms (preferred)
 				"curve25519-sha256", "curve25519-sha256@libssh.org",
 				"ecdh-sha2-nistp256", "ecdh-sha2-nistp384", "ecdh-sha2-nistp521",
 				"diffie-hellman-group14-sha256", "diffie-hellman-group16-sha512",
+				"diffie-hellman-group-exchange-sha256",
+				// Legacy algorithms for maximum compatibility
+				"diffie-hellman-group14-sha1", "diffie-hellman-group1-sha1",
+				"diffie-hellman-group-exchange-sha1",
 			},
 			Ciphers: []string{
+				// Modern ciphers (preferred)
 				"aes128-ctr", "aes192-ctr", "aes256-ctr",
 				"aes128-gcm@openssh.com", "aes256-gcm@openssh.com",
 				"chacha20-poly1305@openssh.com",
+				// Legacy ciphers for maximum compatibility
+				"aes128-cbc", "aes192-cbc", "aes256-cbc",
+				"3des-cbc",
+			},
+			MACs: []string{
+				// Modern MACs (preferred)
+				"hmac-sha2-256-etm@openssh.com", "hmac-sha2-512-etm@openssh.com",
+				"hmac-sha2-256", "hmac-sha2-512",
+				// Legacy MACs for maximum compatibility
+				"hmac-sha1", "hmac-sha1-96",
 			},
 		},
 	}
