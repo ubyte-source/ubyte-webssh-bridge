@@ -335,12 +335,7 @@ ubyte-webssh-bridge/
 
 ## 🤝 Contributing
 
-We welcome contributions! Areas of interest:
-
-- **Security enhancements** and authentication methods
-- **Performance optimizations** and scalability improvements
-- **Protocol support** and WebSocket extensions
-- **Documentation** and examples
+Contributions are welcome! Please fork the repository, create a feature branch, and submit a pull request with a detailed explanation of changes.
 
 ### Getting Started
 
@@ -348,6 +343,27 @@ We welcome contributions! Areas of interest:
 2. Create a feature branch
 3. Make your changes with tests
 4. Submit a pull request
+
+### Areas of Interest
+
+- **Security enhancements** and authentication methods
+- **Performance optimizations** and scalability improvements
+- **Protocol support** and WebSocket extensions
+- **Documentation** and examples
+
+---
+
+## 📋 Versioning
+
+We use [SemVer](https://semver.org/) for versioning. For the versions available, see the [tags on this repository](https://github.com/ubyte-source/ubyte-webssh-bridge/tags).
+
+---
+
+## 👨‍💻 Authors
+
+- **Paolo Fabris** - _Initial work_ - [ubyte.it](https://ubyte.it/)
+
+See also the list of [contributors](https://github.com/ubyte-source/ubyte-webssh-bridge/contributors) who participated in this project.
 
 ## 📄 License
 
@@ -359,6 +375,16 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - **Gorilla WebSocket** - High-performance WebSocket library
 - **xterm.js** - Modern terminal emulation
 - **Community** - Contributors and users
+
+---
+
+## ☕ Support This Project
+
+If this WebSSH Bridge has been useful for your infrastructure or projects, consider supporting its development! Your contributions help maintain and improve this enterprise-grade solution.
+
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-Support-orange?style=for-the-badge&logo=buy-me-a-coffee)](https://coff.ee/ubyte)
+
+Every coffee helps keep the servers running and the code flowing! ☕
 
 ---
 
