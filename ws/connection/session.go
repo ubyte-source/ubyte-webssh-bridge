@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,6 +22,10 @@ const (
 	ErrConnectionReset         = "connection reset by peer"
 	ErrWebSocketCloseSent      = "websocket: close sent"
 	ErrEOF                     = "EOF"
+	ErrContextCanceled         = "context canceled"
+	ErrWebSocketCloseGoingAway = "websocket: close 1001"
+	ErrWebSocketCloseNormal    = "websocket: close 1000"
+	ErrConnectionAborted       = "connection aborted"
 )
 
 // Error patterns for fatal error classification
@@ -158,7 +163,11 @@ func (s *BridgeSession) handleWebSocketMessages() {
 	defer func() {
 		if stdinPipe := s.SSHSession.GetStdinPipe(); stdinPipe != nil {
 			if err := stdinPipe.Close(); err != nil {
-				s.Logger.Errorf("Failed to close stdin pipe: %v", err)
+				if !s.isAcceptableCloseError(err) {
+					s.Logger.Errorf("Failed to close stdin pipe: %v", err)
+				} else {
+					s.Logger.Debugf("Stdin pipe closed normally: %v", err)
+				}
 			}
 		}
 	}()
@@ -166,6 +175,7 @@ func (s *BridgeSession) handleWebSocketMessages() {
 	for {
 		select {
 		case <-s.Context.Done():
+			s.Logger.Debugf("WebSocket message handler shutting down for session %s", s.ID)
 			return
 		default:
 		}
@@ -336,10 +346,13 @@ func (s *BridgeSession) safeCloseWebSocket() error {
 	}
 
 	closeErr := s.WebSocketConn.Close()
-	if closeErr != nil && s.isAcceptableCloseError(closeErr) {
-		// Log but don't propagate acceptable close errors
+	if closeErr == nil {
+		return nil
+	}
+
+	if s.isAcceptableCloseError(closeErr) {
 		s.Logger.Debugf("WebSocket close returned acceptable error: %v", closeErr)
-		closeErr = nil
+		return nil
 	}
 
 	return closeErr
@@ -358,10 +371,14 @@ func (s *BridgeSession) isAcceptableCloseError(err error) bool {
 		ErrConnectionReset,
 		ErrWebSocketCloseSent,
 		ErrEOF,
+		ErrContextCanceled,
+		ErrWebSocketCloseGoingAway,
+		ErrWebSocketCloseNormal,
+		ErrConnectionAborted,
 	}
 
 	for _, acceptableErr := range acceptableErrors {
-		if s.stringContains(errStr, acceptableErr) {
+		if strings.Contains(errStr, acceptableErr) {
 			return true
 		}
 	}
@@ -375,11 +392,15 @@ func (s *BridgeSession) safeCloseSSHSession() error {
 	}
 
 	closeErr := s.SSHSession.Close()
-	if closeErr != nil && s.isAcceptableCloseError(closeErr) {
-		// Log but don't propagate acceptable close errors
-		s.Logger.Debugf("SSH session close returned acceptable error: %v", closeErr)
-		closeErr = nil
+	if closeErr == nil {
+		return nil
 	}
+
+	if s.isAcceptableCloseError(closeErr) {
+		s.Logger.Debugf("SSH session close returned acceptable error: %v", closeErr)
+		return nil
+	}
+
 	return closeErr
 }
 
@@ -390,11 +411,15 @@ func (s *BridgeSession) safeCloseSSHClient() error {
 	}
 
 	closeErr := s.SSHClient.Close()
-	if closeErr != nil && s.isAcceptableCloseError(closeErr) {
-		// Log but don't propagate acceptable close errors
-		s.Logger.Debugf("SSH client close returned acceptable error: %v", closeErr)
-		closeErr = nil
+	if closeErr == nil {
+		return nil
 	}
+
+	if s.isAcceptableCloseError(closeErr) {
+		s.Logger.Debugf("SSH client close returned acceptable error: %v", closeErr)
+		return nil
+	}
+
 	return closeErr
 }
 
@@ -432,36 +457,12 @@ func (s *BridgeSession) isFatalError(err error) bool {
 	}
 
 	for _, pattern := range nonFatalPatterns {
-		if s.stringContains(errStr, pattern) {
+		if strings.Contains(errStr, pattern) {
 			return false
 		}
 	}
 
 	return true
-}
-
-// stringContains checks if a string contains a substring using simple iteration.
-func (s *BridgeSession) stringContains(str, substr string) bool {
-	if len(substr) == 0 {
-		return true
-	}
-	if len(str) < len(substr) {
-		return false
-	}
-
-	for i := 0; i <= len(str)-len(substr); i++ {
-		match := true
-		for j := 0; j < len(substr); j++ {
-			if str[i+j] != substr[j] {
-				match = false
-				break
-			}
-		}
-		if match {
-			return true
-		}
-	}
-	return false
 }
 
 // wsWriterLoop handles all WebSocket writes through a single goroutine
@@ -556,18 +557,15 @@ func (s *BridgeSession) Close() error {
 
 	s.Logger.Infof("Initiating coordinated shutdown for bridge session %s", s.ID)
 
-	// First, initiate shutdown to cancel context and stop goroutines
-	s.initiateShutdown()
-
-	// Wait for all goroutines to finish
-	if s.WaitGroup != nil {
-		s.WaitGroup.Wait()
+	// First, transition to closing state without canceling context yet
+	if !s.stateMachine.TransitionTo(StateClosing) {
+		s.stateMachine.ForceTransitionTo(StateClosing)
 	}
 
 	var finalErr error
 
-	// Close connections in reverse order of creation
-	// 1. Close SSH session first (application level)
+	// Close connections first to signal to goroutines that shutdown is happening
+	// 1. Close SSH session first (application level) - this will cause SSH output to stop
 	if sessionErr := s.safeCloseSSHSession(); sessionErr != nil {
 		s.Logger.Errorf("Error closing SSH session: %v", sessionErr)
 		if finalErr == nil {
@@ -583,12 +581,41 @@ func (s *BridgeSession) Close() error {
 		}
 	}
 
-	// 3. Close WebSocket connection (presentation level)
+	// 3. Close WebSocket connection (presentation level) - this will cause WebSocket reads to fail
 	if wsErr := s.safeCloseWebSocket(); wsErr != nil {
 		s.Logger.Errorf("Error closing WebSocket connection: %v", wsErr)
 		if finalErr == nil {
 			finalErr = wsErr
 		}
+	}
+
+	// Now signal shutdown to control and writer goroutines (safely)
+	select {
+	case <-s.shutdownChan:
+		// Already closed
+	default:
+		close(s.shutdownChan)
+	}
+
+	// Cancel context after signaling shutdown
+	if s.CancelFunc != nil {
+		s.CancelFunc()
+	}
+
+	// Wait for all goroutines to finish with a timeout
+	done := make(chan struct{})
+	go func() {
+		if s.WaitGroup != nil {
+			s.WaitGroup.Wait()
+		}
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		s.Logger.Debugf("All goroutines shut down gracefully for session %s", s.ID)
+	case <-time.After(10 * time.Second):
+		s.Logger.Warnf("Timeout waiting for goroutines to shut down for session %s", s.ID)
 	}
 
 	// Transition to closed state

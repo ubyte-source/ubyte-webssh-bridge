@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"time"
 
 	"github.com/sirupsen/logrus"
 	"github.com/ubyte-source/ubyte-webssh-bridge/message"
@@ -86,26 +87,20 @@ func (c *SSHClient) Connect(ctx context.Context, timeouts SSHTimeouts) error {
 	connectCtx, cancel := context.WithTimeout(ctx, timeouts.HandshakeTimeout)
 	defer cancel()
 
-	dialer := &net.Dialer{Timeout: timeouts.ConnectTimeout}
-	conn, err := dialer.DialContext(connectCtx, "tcp", c.address)
+	conn, err := c.establishTCPConnection(connectCtx, timeouts.ConnectTimeout)
 	if err != nil {
-		c.logger.Errorf("TCP connection to %s failed: %v", c.address, err)
-		return fmt.Errorf("TCP connection failed: %v", err)
+		return err
 	}
 
-	c.logger.Infof("TCP connection established, starting SSH handshake with %v timeout", timeouts.AuthTimeout)
-	sshConn, chans, reqs, err := ssh.NewClientConn(conn, c.address, c.config)
+	sshConn, chans, reqs, err := c.performSSHHandshake(conn, timeouts.AuthTimeout)
 	if err != nil {
-		if closeErr := conn.Close(); closeErr != nil {
-			c.logger.Errorf("Failed to close connection after handshake failure: %v", closeErr)
-		}
-		c.logger.Errorf("SSH handshake to %s failed: %v", c.address, err)
-		return fmt.Errorf("SSH handshake failed: %v", err)
+		c.closeTCPConnection(conn)
+		return err
 	}
 
-	c.logger.Infof("SSH connection successfully established to %s", c.address)
 	c.client = ssh.NewClient(sshConn, chans, reqs)
 	c.connected = true
+	c.logger.Infof("SSH connection successfully established to %s", c.address)
 	return nil
 }
 
@@ -212,4 +207,33 @@ func (s *SSHSession) GetSession() *ssh.Session {
 // Close terminates the SSH session.
 func (s *SSHSession) Close() error {
 	return s.session.Close()
+}
+
+// establishTCPConnection creates a TCP connection to the SSH server with timeout
+func (c *SSHClient) establishTCPConnection(ctx context.Context, connectTimeout time.Duration) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: connectTimeout}
+	conn, err := dialer.DialContext(ctx, "tcp", c.address)
+	if err != nil {
+		c.logger.Errorf("TCP connection to %s failed: %v", c.address, err)
+		return nil, fmt.Errorf("TCP connection failed: %v", err)
+	}
+	return conn, nil
+}
+
+// performSSHHandshake performs the SSH handshake and authentication
+func (c *SSHClient) performSSHHandshake(conn net.Conn, authTimeout time.Duration) (ssh.Conn, <-chan ssh.NewChannel, <-chan *ssh.Request, error) {
+	c.logger.Infof("TCP connection established, starting SSH handshake with %v timeout", authTimeout)
+	sshConn, chans, reqs, err := ssh.NewClientConn(conn, c.address, c.config)
+	if err != nil {
+		c.logger.Errorf("SSH handshake to %s failed: %v", c.address, err)
+		return nil, nil, nil, fmt.Errorf("SSH handshake failed: %v", err)
+	}
+	return sshConn, chans, reqs, nil
+}
+
+// closeTCPConnection safely closes a TCP connection
+func (c *SSHClient) closeTCPConnection(conn net.Conn) {
+	if closeErr := conn.Close(); closeErr != nil {
+		c.logger.Errorf("Failed to close connection after handshake failure: %v", closeErr)
+	}
 }

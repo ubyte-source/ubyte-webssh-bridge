@@ -66,36 +66,6 @@ func TestAcceptableCloseErrors(t *testing.T) {
 	}
 }
 
-func TestStringContains(t *testing.T) {
-	logger := logrus.New()
-
-	session := &BridgeSession{
-		Logger: logger,
-	}
-
-	testCases := []struct {
-		str      string
-		substr   string
-		expected bool
-	}{
-		{"use of closed network connection", "closed", true},
-		{"use of closed network connection", "use of closed", true},
-		{"use of closed network connection", "open", false},
-		{"", "", true},
-		{"hello", "", true},
-		{"", "hello", false},
-		{"EOF", "EOF", true},
-		{"websocket: close sent", "close", true},
-	}
-
-	for _, tc := range testCases {
-		result := session.stringContains(tc.str, tc.substr)
-		if result != tc.expected {
-			t.Errorf("stringContains('%s', '%s'): expected %v, got %v", tc.str, tc.substr, tc.expected, result)
-		}
-	}
-}
-
 func TestCoordinatedCloseWithSyncOnce(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.DebugLevel)

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -154,11 +155,7 @@ func (bridge *WebSSHBridge) handleWebSocket(responseWriter http.ResponseWriter, 
 		bridge.logger.Errorf("WebSocket upgrade error: %v", err)
 		return
 	}
-	defer func() {
-		if err := webSocketConn.Close(); err != nil {
-			bridge.logger.Errorf("Failed to close WebSocket connection: %v", err)
-		}
-	}()
+	defer bridge.closeWebSocketConnection(webSocketConn)
 
 	webSocketConn.SetReadLimit(bridge.config.WebSocketReadLimit)
 
@@ -171,9 +168,7 @@ func (bridge *WebSSHBridge) handleWebSocket(responseWriter http.ResponseWriter, 
 	credentials, err := bridge.readSSHCredentials(webSocketConn)
 	if err != nil {
 		bridge.handleWebSocketError(webSocketConn, "Failed to read SSH credentials", err)
-		if removeErr := bridge.connectionManager.RemoveSession(session.ID); removeErr != nil {
-			bridge.logger.Errorf("Failed to remove session %s after credentials error: %v", session.ID, removeErr)
-		}
+		bridge.cleanupFailedSession(session.ID)
 		return
 	}
 
@@ -188,9 +183,7 @@ func (bridge *WebSSHBridge) handleWebSocket(responseWriter http.ResponseWriter, 
 		bridge.logger.Debugf("SSH session %s completed with error: %v", session.ID, err)
 	}
 
-	if removeErr := bridge.connectionManager.RemoveSession(session.ID); removeErr != nil {
-		bridge.logger.Errorf("Failed to remove session %s after completion: %v", session.ID, removeErr)
-	}
+	bridge.cleanupSession(session.ID)
 }
 
 // handleHealthCheck provides a simple health status of the server.
@@ -246,9 +239,66 @@ func (bridge *WebSSHBridge) readSSHCredentials(webSocketConn *websocket.Conn) (m
 // handleWebSocketError logs an error and ensures the WebSocket connection is closed.
 func (bridge *WebSSHBridge) handleWebSocketError(webSocketConn *websocket.Conn, errorMessage string, err error) {
 	if closeErr := webSocketConn.Close(); closeErr != nil {
-		bridge.logger.Errorf("Failed to close WebSocket after error: %v", closeErr)
+		if !bridge.isAcceptableCloseError(closeErr) {
+			bridge.logger.Errorf("Failed to close WebSocket after error: %v", closeErr)
+			bridge.logger.Errorf("%s: %v", errorMessage, err)
+			return
+		}
+		bridge.logger.Debugf("WebSocket close after error returned acceptable close error: %v", closeErr)
 	}
 	bridge.logger.Errorf("%s: %v", errorMessage, err)
+}
+
+// isAcceptableCloseError checks if an error is expected during WebSocket close operations
+func (bridge *WebSSHBridge) isAcceptableCloseError(err error) bool {
+	if err == nil {
+		return true
+	}
+
+	errStr := err.Error()
+	acceptableErrors := []string{
+		"use of closed network connection",
+		"broken pipe",
+		"connection reset by peer",
+		"websocket: close sent",
+		"EOF",
+		"context canceled",
+		"websocket: close 1001",
+		"websocket: close 1000",
+		"connection aborted",
+	}
+
+	for _, acceptableErr := range acceptableErrors {
+		if strings.Contains(errStr, acceptableErr) {
+			return true
+		}
+	}
+	return false
+}
+
+// closeWebSocketConnection safely closes a WebSocket connection with proper error handling
+func (bridge *WebSSHBridge) closeWebSocketConnection(webSocketConn *websocket.Conn) {
+	if err := webSocketConn.Close(); err != nil {
+		if bridge.isAcceptableCloseError(err) {
+			bridge.logger.Debugf("WebSocket connection closed normally: %v", err)
+		} else {
+			bridge.logger.Errorf("Failed to close WebSocket connection: %v", err)
+		}
+	}
+}
+
+// cleanupFailedSession removes a session that failed during initialization
+func (bridge *WebSSHBridge) cleanupFailedSession(sessionID string) {
+	if removeErr := bridge.connectionManager.RemoveSession(sessionID); removeErr != nil {
+		bridge.logger.Errorf("Failed to remove session %s after credentials error: %v", sessionID, removeErr)
+	}
+}
+
+// cleanupSession removes a session after normal completion
+func (bridge *WebSSHBridge) cleanupSession(sessionID string) {
+	if removeErr := bridge.connectionManager.RemoveSession(sessionID); removeErr != nil {
+		bridge.logger.Errorf("Failed to remove session %s after completion: %v", sessionID, removeErr)
+	}
 }
 
 // Run starts the server and sets up a signal handler for graceful shutdown.

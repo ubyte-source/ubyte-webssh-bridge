@@ -110,101 +110,38 @@ func (manager *ConnectionManager) coordinatorLoop() {
 
 // handleOperation processes a manager operation and sends the response.
 func (manager *ConnectionManager) handleOperation(op ManagerOperation) {
-	var response ManagerResponse
+	response := manager.dispatchOperation(op)
+	manager.sendResponse(op.Response, response)
+}
 
+// dispatchOperation routes the operation to the appropriate handler
+func (manager *ConnectionManager) dispatchOperation(op ManagerOperation) ManagerResponse {
 	switch op.Type {
 	case OpAddSession:
-		data := op.Data.(map[string]interface{})
-		sessionID := data["sessionID"].(string)
-		session := data["session"].(*BridgeSession)
-		targetAddress := data["targetAddress"].(string)
-
-		manager.activeSessions[sessionID] = session
-		manager.hostConnections[targetAddress]++
-		manager.totalSessions++
-
-		response = ManagerResponse{Success: true}
-
+		return manager.handleAddSession(op.Data)
 	case OpRemoveSession:
-		sessionID := op.Data.(string)
-		session, exists := manager.activeSessions[sessionID]
-
-		if !exists {
-			response = ManagerResponse{Success: false, Error: fmt.Errorf("session %s not found", sessionID)}
-			break
-		}
-
-		delete(manager.activeSessions, sessionID)
-		if count, ok := manager.hostConnections[session.TargetAddress]; ok && count > 0 {
-			manager.hostConnections[session.TargetAddress]--
-			if manager.hostConnections[session.TargetAddress] == 0 {
-				delete(manager.hostConnections, session.TargetAddress)
-			}
-		}
-		response = ManagerResponse{Success: true, Data: session}
-
+		return manager.handleRemoveSession(op.Data)
 	case OpGetSession:
-		sessionID := op.Data.(string)
-		session, exists := manager.activeSessions[sessionID]
-		response = ManagerResponse{Success: exists, Data: session}
-
+		return manager.handleGetSession(op.Data)
 	case OpGetActiveSessions:
-		sessionCopy := make(map[string]*BridgeSession, len(manager.activeSessions))
-		for id, session := range manager.activeSessions {
-			sessionCopy[id] = session
-		}
-		response = ManagerResponse{Success: true, Data: sessionCopy}
-
+		return manager.handleGetActiveSessions()
 	case OpGetStats:
-		// Create snapshot of current stats
-		hostStats := make(map[string]int)
-		for host, count := range manager.hostConnections {
-			hostStats[host] = count
-		}
-
-		stats := map[string]interface{}{
-			"active_sessions":     len(manager.activeSessions),
-			"total_sessions":      manager.totalSessions,
-			"successful_sessions": manager.successfulSessions,
-			"failed_sessions":     manager.failedSessions,
-			"host_connections":    hostStats,
-			"max_connections":     manager.config.MaxConnections,
-			"max_per_host":        manager.config.MaxConnectionsPerHost,
-		}
-		response = ManagerResponse{Success: true, Data: stats}
-
+		return manager.handleGetStats()
 	case OpUpdateStats:
-		data := op.Data.(map[string]interface{})
-		if increment, ok := data["successful"]; ok && increment.(bool) {
-			manager.successfulSessions++
-		}
-		if increment, ok := data["failed"]; ok && increment.(bool) {
-			manager.failedSessions++
-		}
-		response = ManagerResponse{Success: true}
-
+		return manager.handleUpdateStats(op.Data)
 	case OpCheckLimits:
-		data := op.Data.(map[string]interface{})
-		targetAddress := data["targetAddress"].(string)
-
-		if err := manager.checkGlobalConnectionLimit(); err != nil {
-			response = ManagerResponse{Success: false, Error: err}
-			break
-		}
-		if err := manager.checkHostConnectionLimit(targetAddress); err != nil {
-			response = ManagerResponse{Success: false, Error: err}
-			break
-		}
-		response = ManagerResponse{Success: true}
-
+		return manager.handleCheckLimits(op.Data)
 	case OpCleanupInactiveSessions:
-		manager.cleanupInactiveSessions()
-		response = ManagerResponse{Success: true}
+		return manager.handleCleanupInactiveSessions()
+	default:
+		return ManagerResponse{Success: false, Error: fmt.Errorf("unknown operation type: %v", op.Type)}
 	}
+}
 
-	// Send response back
+// sendResponse safely sends a response back to the caller
+func (manager *ConnectionManager) sendResponse(responseChan chan ManagerResponse, response ManagerResponse) {
 	select {
-	case op.Response <- response:
+	case responseChan <- response:
 	case <-time.After(5 * time.Second):
 		manager.logger.Errorf("Failed to send manager operation response - timeout")
 	}
@@ -520,4 +457,104 @@ func (manager *ConnectionManager) Shutdown() error {
 	}
 	manager.logger.Infof("Connection manager shutdown complete. Closed %d sessions.", len(sessions))
 	return nil
+}
+
+// handleAddSession processes adding a new session to the manager
+func (manager *ConnectionManager) handleAddSession(data interface{}) ManagerResponse {
+	sessionData := data.(map[string]interface{})
+	sessionID := sessionData["sessionID"].(string)
+	session := sessionData["session"].(*BridgeSession)
+	targetAddress := sessionData["targetAddress"].(string)
+
+	manager.activeSessions[sessionID] = session
+	manager.hostConnections[targetAddress]++
+	manager.totalSessions++
+
+	return ManagerResponse{Success: true}
+}
+
+// handleRemoveSession processes removing a session from the manager
+func (manager *ConnectionManager) handleRemoveSession(data interface{}) ManagerResponse {
+	sessionID := data.(string)
+	session, exists := manager.activeSessions[sessionID]
+
+	if !exists {
+		return ManagerResponse{Success: false, Error: fmt.Errorf("session %s not found", sessionID)}
+	}
+
+	delete(manager.activeSessions, sessionID)
+	if count, ok := manager.hostConnections[session.TargetAddress]; ok && count > 0 {
+		manager.hostConnections[session.TargetAddress]--
+		if manager.hostConnections[session.TargetAddress] == 0 {
+			delete(manager.hostConnections, session.TargetAddress)
+		}
+	}
+	return ManagerResponse{Success: true, Data: session}
+}
+
+// handleGetSession processes retrieving a session by ID
+func (manager *ConnectionManager) handleGetSession(data interface{}) ManagerResponse {
+	sessionID := data.(string)
+	session, exists := manager.activeSessions[sessionID]
+	return ManagerResponse{Success: exists, Data: session}
+}
+
+// handleGetActiveSessions processes retrieving all active sessions
+func (manager *ConnectionManager) handleGetActiveSessions() ManagerResponse {
+	sessionCopy := make(map[string]*BridgeSession, len(manager.activeSessions))
+	for id, session := range manager.activeSessions {
+		sessionCopy[id] = session
+	}
+	return ManagerResponse{Success: true, Data: sessionCopy}
+}
+
+// handleGetStats processes retrieving manager statistics
+func (manager *ConnectionManager) handleGetStats() ManagerResponse {
+	hostStats := make(map[string]int)
+	for host, count := range manager.hostConnections {
+		hostStats[host] = count
+	}
+
+	stats := map[string]interface{}{
+		"active_sessions":     len(manager.activeSessions),
+		"total_sessions":      manager.totalSessions,
+		"successful_sessions": manager.successfulSessions,
+		"failed_sessions":     manager.failedSessions,
+		"host_connections":    hostStats,
+		"max_connections":     manager.config.MaxConnections,
+		"max_per_host":        manager.config.MaxConnectionsPerHost,
+	}
+	return ManagerResponse{Success: true, Data: stats}
+}
+
+// handleUpdateStats processes updating manager statistics
+func (manager *ConnectionManager) handleUpdateStats(data interface{}) ManagerResponse {
+	statsData := data.(map[string]interface{})
+	if increment, ok := statsData["successful"]; ok && increment.(bool) {
+		manager.successfulSessions++
+	}
+	if increment, ok := statsData["failed"]; ok && increment.(bool) {
+		manager.failedSessions++
+	}
+	return ManagerResponse{Success: true}
+}
+
+// handleCheckLimits processes checking connection limits
+func (manager *ConnectionManager) handleCheckLimits(data interface{}) ManagerResponse {
+	limitsData := data.(map[string]interface{})
+	targetAddress := limitsData["targetAddress"].(string)
+
+	if err := manager.checkGlobalConnectionLimit(); err != nil {
+		return ManagerResponse{Success: false, Error: err}
+	}
+	if err := manager.checkHostConnectionLimit(targetAddress); err != nil {
+		return ManagerResponse{Success: false, Error: err}
+	}
+	return ManagerResponse{Success: true}
+}
+
+// handleCleanupInactiveSessions processes cleanup of inactive sessions
+func (manager *ConnectionManager) handleCleanupInactiveSessions() ManagerResponse {
+	manager.cleanupInactiveSessions()
+	return ManagerResponse{Success: true}
 }

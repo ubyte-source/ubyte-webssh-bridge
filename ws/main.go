@@ -108,123 +108,131 @@ func main() {
 	}
 }
 
+// configResolver provides consistent flag and environment variable resolution
+type configResolver struct{}
+
+// getString retrieves a string value, preferring the flag over the environment variable
+func (r configResolver) getString(flagValue *string, envKey string, fallback string) string {
+	if flagValue != nil && *flagValue != "" {
+		return *flagValue
+	}
+	if value := os.Getenv(envKey); value != "" {
+		return value
+	}
+	return fallback
+}
+
+// getInt retrieves an integer value, preferring the flag over the environment variable
+func (r configResolver) getInt(flagValue *int, envKey string, fallback int) int {
+	if flagValue != nil && *flagValue > 0 {
+		return *flagValue
+	}
+	if value := os.Getenv(envKey); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			return parsed
+		}
+	}
+	return fallback
+}
+
+// getInt64 retrieves an int64 value, preferring the flag over the environment variable
+func (r configResolver) getInt64(flagValue *int64, envKey string, fallback int64) int64 {
+	if flagValue != nil && *flagValue > 0 {
+		return *flagValue
+	}
+	if value := os.Getenv(envKey); value != "" {
+		if parsed, err := strconv.ParseInt(value, 10, 64); err == nil && parsed > 0 {
+			return parsed
+		}
+	}
+	return fallback
+}
+
+// getBool retrieves a boolean value, preferring the flag over the environment variable
+func (r configResolver) getBool(flagValue *bool, envKey string, fallback bool) bool {
+	if flagValue != nil {
+		return *flagValue
+	}
+	if value := os.Getenv(envKey); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			return parsed
+		}
+	}
+	return fallback
+}
+
+// getDuration retrieves a time.Duration value, preferring the flag over the environment variable
+func (r configResolver) getDuration(flagValue *string, envKey string, fallback time.Duration) time.Duration {
+	var value string
+	if flagValue != nil && *flagValue != "" {
+		value = *flagValue
+	} else {
+		value = os.Getenv(envKey)
+	}
+
+	if value == "" {
+		return fallback
+	}
+
+	if parsed, err := time.ParseDuration(value); err == nil {
+		return parsed
+	}
+	return fallback
+}
+
+// getStringSlice retrieves a slice of strings, preferring the flag over the environment variable
+func (r configResolver) getStringSlice(flagValue *string, envKey string, fallback []string) []string {
+	var value string
+	if flagValue != nil && *flagValue != "" {
+		value = *flagValue
+	} else {
+		value = os.Getenv(envKey)
+	}
+
+	if value == "" {
+		return fallback
+	}
+
+	return strings.Split(strings.TrimSpace(value), ",")
+}
+
 // applyConfig populates the configuration struct from command-line flags and
 // environment variables. Command-line flags take precedence over environment variables.
 func applyConfig(cfg *config.Configuration) {
-	// getString retrieves a string value, preferring the flag over the environment variable.
-	getString := func(flagValue *string, envKey string, fallback string) string {
-		if flagValue != nil && *flagValue != "" {
-			return *flagValue
-		}
-		if value := os.Getenv(envKey); value != "" {
-			return value
-		}
-		return fallback
-	}
+	resolver := configResolver{}
 
-	// getInt retrieves an integer value, preferring the flag over the environment variable.
-	getInt := func(flagValue *int, envKey string, fallback int) int {
-		if flagValue != nil && *flagValue > 0 {
-			return *flagValue
-		}
-		if value := os.Getenv(envKey); value != "" {
-			if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
-				return parsed
-			}
-		}
-		return fallback
-	}
+	// Server configuration
+	cfg.ListenAddress = resolver.getString(listenAddress, "UWSB_SERVER_ADDRESS", cfg.ListenAddress)
+	cfg.CertificateFile = resolver.getString(certificateFile, "UWSB_SERVER_CERT_FILE", cfg.CertificateFile)
+	cfg.KeyFile = resolver.getString(keyFile, "UWSB_SERVER_KEY_FILE", cfg.KeyFile)
+	cfg.DebugMode = resolver.getBool(debugMode, "UWSB_SERVER_DEBUG", cfg.DebugMode)
+	cfg.ShutdownTimeout = resolver.getDuration(shutdownTimeout, "UWSB_SERVER_SHUTDOWN_TIMEOUT", cfg.ShutdownTimeout)
 
-	// getInt64 retrieves an int64 value, preferring the flag over the environment variable.
-	getInt64 := func(flagValue *int64, envKey string, fallback int64) int64 {
-		if flagValue != nil && *flagValue > 0 {
-			return *flagValue
-		}
-		if value := os.Getenv(envKey); value != "" {
-			if parsed, err := strconv.ParseInt(value, 10, 64); err == nil && parsed > 0 {
-				return parsed
-			}
-		}
-		return fallback
-	}
+	// Connection configuration
+	cfg.MaxConnections = resolver.getInt(maxConnections, "UWSB_CONN_MAX_TOTAL", cfg.MaxConnections)
+	cfg.MaxConnectionsPerHost = resolver.getInt(maxConnectionsPerHost, "UWSB_CONN_MAX_PER_HOST", cfg.MaxConnectionsPerHost)
+	cfg.ConnectionTimeout = resolver.getDuration(connectionTimeout, "UWSB_CONN_TIMEOUT", cfg.ConnectionTimeout)
 
-	// getBool retrieves a boolean value, preferring the flag over the environment variable.
-	getBool := func(flagValue *bool, envKey string, fallback bool) bool {
-		if flagValue != nil {
-			return *flagValue
-		}
-		if value := os.Getenv(envKey); value != "" {
-			if parsed, err := strconv.ParseBool(value); err == nil {
-				return parsed
-			}
-		}
-		return fallback
-	}
+	// SSH configuration
+	cfg.SSHConnectTimeout = resolver.getDuration(sshConnectTimeout, "UWSB_SSH_CONNECT_TIMEOUT", cfg.SSHConnectTimeout)
+	cfg.SSHAuthTimeout = resolver.getDuration(sshAuthTimeout, "UWSB_SSH_AUTH_TIMEOUT", cfg.SSHAuthTimeout)
+	cfg.SSHHandshakeTimeout = resolver.getDuration(sshHandshakeTimeout, "UWSB_SSH_HANDSHAKE_TIMEOUT", cfg.SSHHandshakeTimeout)
 
-	// getDuration retrieves a time.Duration value, preferring the flag over the environment variable.
-	getDuration := func(flagValue *string, envKey string, fallback time.Duration) time.Duration {
-		var value string
-		if flagValue != nil && *flagValue != "" {
-			value = *flagValue
-		} else {
-			value = os.Getenv(envKey)
-		}
+	// WebSocket configuration
+	cfg.WebSocketReadBufferSize = resolver.getInt(wsReadBufferSize, "UWSB_WS_READ_BUFFER", cfg.WebSocketReadBufferSize)
+	cfg.WebSocketWriteBufferSize = resolver.getInt(wsWriteBufferSize, "UWSB_WS_WRITE_BUFFER", cfg.WebSocketWriteBufferSize)
+	cfg.WebSocketHandshakeTimeout = resolver.getDuration(wsHandshakeTimeout, "UWSB_WS_HANDSHAKE_TIMEOUT", cfg.WebSocketHandshakeTimeout)
+	cfg.WebSocketReadLimit = resolver.getInt64(wsReadLimit, "UWSB_WS_READ_LIMIT", cfg.WebSocketReadLimit)
 
-		if value == "" {
-			return fallback
-		}
+	// Rate limiting configuration
+	cfg.RateLimitInterval = resolver.getDuration(rateLimitInterval, "UWSB_RATE_INTERVAL", cfg.RateLimitInterval)
+	cfg.RateLimitBurst = resolver.getInt(rateLimitBurst, "UWSB_RATE_BURST", cfg.RateLimitBurst)
+	cfg.RateLimitPerIP = resolver.getBool(rateLimitPerIP, "UWSB_RATE_PER_IP", cfg.RateLimitPerIP)
+	cfg.RateLimitWhitelist = resolver.getStringSlice(rateLimitWhitelist, "UWSB_RATE_WHITELIST", cfg.RateLimitWhitelist)
 
-		parsed, err := time.ParseDuration(value)
-		if err != nil {
-			return fallback
-		}
-
-		return parsed
-	}
-
-	// getStringSlice retrieves a slice of strings, preferring the flag over the environment variable.
-	getStringSlice := func(flagValue *string, envKey string, fallback []string) []string {
-		var value string
-		if flagValue != nil && *flagValue != "" {
-			value = *flagValue
-		} else {
-			value = os.Getenv(envKey)
-		}
-
-		if value == "" {
-			return fallback
-		}
-
-		return strings.Split(strings.TrimSpace(value), ",")
-	}
-
-	// Populate the configuration struct
-	cfg.ListenAddress = getString(listenAddress, "UWSB_SERVER_ADDRESS", cfg.ListenAddress)
-	cfg.CertificateFile = getString(certificateFile, "UWSB_SERVER_CERT_FILE", cfg.CertificateFile)
-	cfg.KeyFile = getString(keyFile, "UWSB_SERVER_KEY_FILE", cfg.KeyFile)
-	cfg.DebugMode = getBool(debugMode, "UWSB_SERVER_DEBUG", cfg.DebugMode)
-	cfg.ShutdownTimeout = getDuration(shutdownTimeout, "UWSB_SERVER_SHUTDOWN_TIMEOUT", cfg.ShutdownTimeout)
-
-	cfg.MaxConnections = getInt(maxConnections, "UWSB_CONN_MAX_TOTAL", cfg.MaxConnections)
-	cfg.MaxConnectionsPerHost = getInt(maxConnectionsPerHost, "UWSB_CONN_MAX_PER_HOST", cfg.MaxConnectionsPerHost)
-	cfg.ConnectionTimeout = getDuration(connectionTimeout, "UWSB_CONN_TIMEOUT", cfg.ConnectionTimeout)
-
-	cfg.SSHConnectTimeout = getDuration(sshConnectTimeout, "UWSB_SSH_CONNECT_TIMEOUT", cfg.SSHConnectTimeout)
-	cfg.SSHAuthTimeout = getDuration(sshAuthTimeout, "UWSB_SSH_AUTH_TIMEOUT", cfg.SSHAuthTimeout)
-	cfg.SSHHandshakeTimeout = getDuration(sshHandshakeTimeout, "UWSB_SSH_HANDSHAKE_TIMEOUT", cfg.SSHHandshakeTimeout)
-
-	cfg.WebSocketReadBufferSize = getInt(wsReadBufferSize, "UWSB_WS_READ_BUFFER", cfg.WebSocketReadBufferSize)
-	cfg.WebSocketWriteBufferSize = getInt(wsWriteBufferSize, "UWSB_WS_WRITE_BUFFER", cfg.WebSocketWriteBufferSize)
-	cfg.WebSocketHandshakeTimeout = getDuration(wsHandshakeTimeout, "UWSB_WS_HANDSHAKE_TIMEOUT", cfg.WebSocketHandshakeTimeout)
-	cfg.WebSocketReadLimit = getInt64(wsReadLimit, "UWSB_WS_READ_LIMIT", cfg.WebSocketReadLimit)
-
-	cfg.RateLimitInterval = getDuration(rateLimitInterval, "UWSB_RATE_INTERVAL", cfg.RateLimitInterval)
-	cfg.RateLimitBurst = getInt(rateLimitBurst, "UWSB_RATE_BURST", cfg.RateLimitBurst)
-	cfg.RateLimitPerIP = getBool(rateLimitPerIP, "UWSB_RATE_PER_IP", cfg.RateLimitPerIP)
-	cfg.RateLimitWhitelist = getStringSlice(rateLimitWhitelist, "UWSB_RATE_WHITELIST", cfg.RateLimitWhitelist)
-
-	cfg.EnableHealthCheck = getBool(enableHealthCheck, "UWSB_HEALTH_ENABLED", cfg.EnableHealthCheck)
-	cfg.HealthCheckPath = getString(healthCheckPath, "UWSB_HEALTH_PATH", cfg.HealthCheckPath)
-	cfg.EnableMetrics = getBool(enableMetrics, "UWSB_METRICS_ENABLED", cfg.EnableMetrics)
-	cfg.MetricsPath = getString(metricsPath, "UWSB_METRICS_PATH", cfg.MetricsPath)
+	// Monitoring configuration
+	cfg.EnableHealthCheck = resolver.getBool(enableHealthCheck, "UWSB_HEALTH_ENABLED", cfg.EnableHealthCheck)
+	cfg.HealthCheckPath = resolver.getString(healthCheckPath, "UWSB_HEALTH_PATH", cfg.HealthCheckPath)
+	cfg.EnableMetrics = resolver.getBool(enableMetrics, "UWSB_METRICS_ENABLED", cfg.EnableMetrics)
+	cfg.MetricsPath = resolver.getString(metricsPath, "UWSB_METRICS_PATH", cfg.MetricsPath)
 }
