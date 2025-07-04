@@ -61,7 +61,6 @@ done
 # Otherwise it loops forever, waking up every 60 seconds
 
 runner() {
-  echo "Stop this container."
   kill -SIGINT 1
   exit 1
 }
@@ -71,7 +70,7 @@ runner() {
 name() {
   local brew=${1##*|}
   [[ "$1" == "$brew" ]] && brew=${1##*=}
-  echo "$brew"
+  echo "${brew/ /}"
   return 0
 }
 
