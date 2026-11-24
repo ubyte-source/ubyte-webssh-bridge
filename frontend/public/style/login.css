@@ -1,0 +1,253 @@
+[hidden] {
+  display: none !important;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  background: #222222;
+}
+
+div.container {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 100vh;
+  min-height: 100dvh;
+  padding: 1em 0;
+  text-align: center;
+  background: #222222;
+}
+
+div.parts {
+  width: 20em;
+  max-width: calc(100vw - 2em);
+  background-color: #fff;
+  padding: 1.5em;
+  border-radius: 0.125em;
+  font-family: "proxima-nova", helvetica, sans-serif;
+  color: #222222;
+  text-align: center;
+}
+
+div.parts h5 {
+  font-size: 1.5em;
+  font-weight: 300;
+}
+
+div.parts input,
+div.parts button {
+  display: block;
+  margin: 1.5em auto;
+  width: 100%;
+  max-width: 17.75em;
+  padding: 1em;
+  font-family: inherit;
+  font-size: 1.125em;
+  color: #222222;
+  border: 0.125em solid #e7e7e7;
+  background: #fcfcfc;
+  border-radius: 0.125em;
+}
+
+div.parts input:focus,
+div.parts button:focus {
+  outline: none;
+}
+
+div.parts input:focus {
+  background: #f7f7f7;
+  border-color: #e1e1e1;
+}
+
+div.parts button {
+  margin-bottom: 0;
+  cursor: pointer;
+  transition: background-color 0.3s ease;
+}
+
+div.parts button + button {
+  margin-top: 0.75em;
+}
+
+div.parts button:hover,
+div.parts button:focus-visible {
+  background-color: #f3f3f3;
+}
+
+div.parts button.primary {
+  border: 0.125em solid transparent;
+  color: white;
+  background: #15cd72;
+}
+
+div.parts button.primary:hover,
+div.parts button.primary:focus {
+  background-color: #13b864;
+}
+
+div.parts p.note,
+div.parts p.status,
+div.parts p.instruction {
+  font-size: 0.875em;
+  line-height: 1.4;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+div.parts p.note {
+  margin-top: -1.25em;
+  color: #c0392b;
+}
+
+div.parts p.note:empty,
+div.parts p.status:empty {
+  display: none;
+}
+
+div.parts p.status {
+  margin-top: 1.5em;
+  color: #555555;
+  text-align: center;
+}
+
+div.parts p.status.error {
+  color: #c0392b;
+}
+
+div.parts p.instruction {
+  margin-top: 1em;
+  color: #555555;
+  white-space: pre-wrap;
+}
+
+div.parts code {
+  display: inline-block;
+  margin-top: 0.25em;
+  padding: 0.125em 0.375em;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  background: #f3f3f3;
+  border-radius: 0.125em;
+  overflow-wrap: anywhere;
+}
+
+div.parts div.fields[inert] {
+  opacity: 0.6;
+}
+
+div.parts div.key {
+  margin: 1.5em auto;
+}
+
+div.parts div.key div.zone {
+  padding: 1em;
+  font-size: 1em;
+  line-height: 1.4;
+  color: #777777;
+  border: 0.125em solid #e7e7e7;
+  background: #fcfcfc;
+  border-radius: 0.125em;
+  cursor: pointer;
+  transition: background-color 0.3s ease, border-color 0.3s ease;
+}
+
+div.parts div.key div.zone:focus {
+  outline: none;
+  background: #f7f7f7;
+  border-color: #e1e1e1;
+}
+
+div.parts div.key div.zone.over {
+  border-color: #15cd72;
+  background: #f3fcf7;
+}
+
+div.parts div.key div.chip {
+  padding: 0.75em 1em;
+  text-align: left;
+  border: 0.125em solid #e7e7e7;
+  background: #fcfcfc;
+  border-radius: 0.125em;
+}
+
+div.parts div.key div.chip div.head {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+}
+
+div.parts div.key div.chip svg.lock {
+  flex: none;
+  width: 1em;
+  height: 1em;
+  fill: none;
+  stroke: #222222;
+  stroke-width: 1.5;
+}
+
+div.parts div.key div.chip p.name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+div.parts div.key div.chip button {
+  flex: none;
+  width: auto;
+  margin: 0;
+  padding: 0;
+  font-size: 0.875em;
+  color: #13b864;
+  border: 0;
+  background: none;
+}
+
+div.parts div.key div.chip p.kind,
+div.parts div.key div.chip p.comment {
+  margin-top: 0.5em;
+  font-size: 0.75em;
+  line-height: 1.4;
+  color: #555555;
+  overflow-wrap: anywhere;
+}
+
+div.parts div.key div.chip p.kind {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+div.parts div.key div.chip p.comment:empty {
+  display: none;
+}
+
+div.parts div.key p.note {
+  margin-top: 0.75em;
+}
+
+div.parts.challenge label {
+  display: block;
+  margin-top: 1.5em;
+  text-align: left;
+}
+
+div.parts.challenge label span {
+  display: block;
+  font-size: 0.875em;
+  color: #555555;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+div.parts.challenge label input {
+  margin: 0.5em auto 0;
+}
+
+div.parts.challenge p.note {
+  margin-top: 0.75em;
+}

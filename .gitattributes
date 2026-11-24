@@ -1,0 +1,3 @@
+* text=auto eol=lf
+frontend/public/javascript/lib/** linguist-vendored
+frontend/public/style/lib/** linguist-vendored

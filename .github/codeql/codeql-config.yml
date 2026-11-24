@@ -1,0 +1,10 @@
+name: "CodeQL config"
+
+queries:
+  - uses: security-and-quality
+
+# The vendored xterm build is not ours, and the page's tests generate weak keys on purpose to prove they are
+# refused.
+paths-ignore:
+  - frontend/public/javascript/lib
+  - frontend/test

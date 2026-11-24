@@ -1,0 +1,33 @@
+Usage of ubyte-webssh-bridge:
+  -conn-max-per-host int
+    	concurrent sessions to one target on the path route, at most -conn-max-total (default 10)
+  -conn-max-total int
+    	concurrent sessions of the process (default 1000)
+  -health
+    	dial the listen address and exit 0 when it accepts a TCP connection
+  -rate-burst int
+    	new sessions one client address opens at once (default 10)
+  -rate-interval duration
+    	time a client address takes to regain -rate-burst new sessions (default 2s)
+  -server-address string
+    	TLS listen address, host:port; beyond loopback it needs -ssh-target (default ":8443")
+  -server-cert string
+    	PEM file of the TLS certificate and its chain (default "/data/certificate.crt")
+  -server-debug
+    	write the debug records too
+  -server-key string
+    	PEM file of the TLS private key (default "/data/certificate.key")
+  -server-shutdown-timeout duration
+    	time the sessions have to end after SIGINT or SIGTERM (default 30s)
+  -server-trusted-proxies list
+    	IPs and CIDR prefixes of proxies whose X-Forwarded-For and X-Real-IP name the client (default "127.0.0.0/8,::1/128")
+  -ssh-connect-timeout duration
+    	time to open the TCP connection to the target (default 10s)
+  -ssh-login-timeout duration
+    	time from the TCP connection to the started shell, the user's answers included (default 2m0s)
+  -ssh-target string
+    	host:port every session reaches through /ws; empty: /ws/{host}/{port}, on a loopback listener only
+  -version
+    	print the version and the Go release and exit
+  -ws-handshake-timeout duration
+    	time a client has to send its request headers and its connect message (default 10s)

@@ -1,5 +1,11 @@
-Dockerfile
 .git
+.github
 .env
 .gitignore
 .dockerignore
+*.json
+*.out
+*.md
+Dockerfile
+LICENSE
+frontend/test

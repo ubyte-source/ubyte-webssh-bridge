@@ -1,29 +1,123 @@
-name: Hub docker public image
+name: Docker image
 
 on:
   push:
     tags:
-      - '*'
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v2
+      - '[0-9]+.[0-9]+.[0-9]+*'
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version, such as 1.0.0, equal to the tag the run is on'
+        required: true
+        type: string
 
-      - name: Set environment tag variables
+# The push calls security.yml, whose CodeQL job needs the permissions it holds.
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
+jobs:
+  # A pull request builds the image without pushing, so a broken Dockerfile fails at
+  # review time.
+  validate:
+    name: Build without push
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build the image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          build-args: |
+            VERSION=pr-${{ github.event.pull_request.number }}
+
+  # The push waits for the lint, test and security workflows of the same commit.
+  lint:
+    name: Lint
+    if: github.event_name != 'pull_request'
+    uses: ./.github/workflows/lint.yml
+
+  test:
+    name: Tests
+    if: github.event_name != 'pull_request'
+    uses: ./.github/workflows/test.yml
+
+  security:
+    name: Security
+    if: github.event_name != 'pull_request'
+    uses: ./.github/workflows/security.yml
+
+  build:
+    name: Build and push
+    if: github.event_name != 'pull_request'
+    needs: [lint, test, security]
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # An image is published only from its release tag, on a dispatch too; :latest
+      # follows final releases pushed as tags only, so a release candidate or a manual
+      # build never takes the place of what runs in production.
+      - name: Resolve the version and the tags
+        env:
+          VERSION: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
+          REF: ${{ github.ref }}
+          EVENT: ${{ github.event_name }}
+          REPOSITORY: ubyte/ubyte-webssh-bridge
         run: |
-          echo "RELEASE_VERSION=${GITHUB_REF#refs/*/}" >> $GITHUB_ENV
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::version $VERSION is not a release version such as 1.0.0"
+            exit 1
+          fi
+          if [[ "$REF" != "refs/tags/$VERSION" ]]; then
+            echo "::error::$REF is not the release tag $VERSION"
+            exit 1
+          fi
+          {
+            echo "RELEASE_VERSION=$VERSION"
+            echo "IMAGE_TAGS<<EOF"
+            echo "$REPOSITORY:$VERSION"
+            if [[ "$EVENT" == push && "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "$REPOSITORY:latest"
+            fi
+            echo EOF
+          } >> "$GITHUB_ENV"
+
+      - name: Report the tags
+        run: printf '%s\n' "$IMAGE_TAGS"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
       - name: Login to Docker Hub
-        uses: docker/login-action@v1
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_ACCESS_TOKEN }}
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@v2
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
+          platforms: linux/amd64
           push: true
-          tags: |
-            ${{ secrets.DOCKER_USERNAME }}/${{ github.event.repository.name }}:${{ env.RELEASE_VERSION }},${{ secrets.DOCKER_USERNAME }}/${{ github.event.repository.name }}:latest
+          sbom: true
+          provenance: true
+          build-args: |
+            VERSION=${{ env.RELEASE_VERSION }}
+          tags: ${{ env.IMAGE_TAGS }}

@@ -1,44 +1,29 @@
-FROM golang:alpine AS build-stage 
-
-COPY ws /app
+FROM golang:1.27.4-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280 AS build-stage
 
 WORKDIR /app
 
-RUN go mod download
-RUN go mod tidy
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -buildvcs=false -o ubyte-webssh-bridge .
+COPY go.mod go.sum ./
+RUN go mod download && \
+    go mod verify
 
-FROM amd64/alpine:3.21.3
+COPY . .
 
-ENV STARTUP_COMMAND_RUN_NGINX="nginx"
-ENV STARTUP_COMMAND_RUN_UBYTE="/usr/local/bin/ubyte-webssh-bridge | ubyte-webssh-bridge"
-ARG TIMEZONE="UTC"
+ARG VERSION=dev
 
-RUN apk update && \
-    apk add --no-cache nginx nginx-mod-stream curl && \
-    apk add --no-cache bash openssl && \
-    apk add --no-cache tzdata && \
-    mkdir -p /var/www /data && \
-    rm -rf /var/cache/apk/*
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOAMD64=v1 \
+    go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" \
+    -o ubyte-webssh-bridge ./cmd/ubyte-webssh-bridge
 
-COPY wrapper /usr/sbin/wrapper
-COPY healthcheck /usr/sbin/healthcheck
-COPY frontend /var/www
-COPY nginx /etc/nginx
+FROM gcr.io/distroless/static-debian13:nonroot@sha256:8ce6dd87e9823c5b48dcfb2c8604714ccb351ce59607327bcc4957448da279b5
 
 COPY --from=build-stage /app/ubyte-webssh-bridge /usr/local/bin/ubyte-webssh-bridge
 
-RUN adduser -D -g www www && \
-    chown -R www:www /var/lib/nginx /var/log/nginx /var/www /data /etc/nginx && \
-    chmod +x /usr/sbin/wrapper /usr/sbin/healthcheck /usr/local/bin/ubyte-webssh-bridge && \
-    rm -Rf /etc/nginx/sites-enabled /etc/nginx/sites-available && \
-    cp -r /usr/share/zoneinfo/${TIMEZONE} /etc/localtime && \
-    echo "${TIMEZONE}" > /etc/timezone
+USER 65532:65532
 
-EXPOSE 8443/tcp
+EXPOSE 8443
 
-USER www
+# The probe reads the configuration and dials the listen address.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD ["/usr/local/bin/ubyte-webssh-bridge", "-health"]
 
-HEALTHCHECK --interval=12s --timeout=4s CMD /usr/sbin/healthcheck
-
-ENTRYPOINT [ "/usr/sbin/wrapper" ]
+ENTRYPOINT ["/usr/local/bin/ubyte-webssh-bridge"]
