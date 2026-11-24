@@ -1,0 +1,77 @@
+name: Fuzz
+
+on:
+  schedule:
+    - cron: "0 4 1 * *"
+  workflow_dispatch:
+    inputs:
+      fuzztime:
+        description: "Fuzz duration per target, such as 5m or 30m, or a count such as 500x"
+        required: false
+        default: "10m"
+
+permissions:
+  contents: read
+
+jobs:
+  targets:
+    name: Targets
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.list.outputs.matrix }}
+      fuzztime: ${{ steps.list.outputs.fuzztime }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: List the fuzz targets and check the duration
+        id: list
+        env:
+          FUZZTIME: ${{ inputs.fuzztime || '10m' }}
+        run: |
+          if [[ ! "$FUZZTIME" =~ ^[0-9]+(ms|s|m|h|x)$ ]]; then
+            echo "::error::fuzztime $FUZZTIME is neither a duration such as 10m nor a count such as 500x"
+            exit 1
+          fi
+          echo "fuzztime=$FUZZTIME" >> "$GITHUB_OUTPUT"
+          matrix=$(make -s fuzz-list)
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  fuzz:
+    name: Fuzz ${{ matrix.pkg }}:${{ matrix.target }}
+    needs: targets
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.targets.outputs.matrix) }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Run fuzz
+        env:
+          FUZZTIME: ${{ needs.targets.outputs.fuzztime }}
+          SPEC: ${{ matrix.pkg }}:${{ matrix.target }}
+        run: make fuzz FUZZ_TARGETS="$SPEC" FUZZTIME="$FUZZTIME"
+
+      # A crasher is printed in the log and becomes an f.Add seed with a named test.
+      - name: Print the failing input
+        if: failure()
+        run: find . -path '*/testdata/fuzz/*' -type f -print -exec cat {} \;

@@ -1,0 +1,14 @@
+UWSB_CONN_MAX_PER_HOST -conn-max-per-host
+UWSB_CONN_MAX_TOTAL -conn-max-total
+UWSB_RATE_BURST -rate-burst
+UWSB_RATE_INTERVAL -rate-interval
+UWSB_SERVER_ADDRESS -server-address
+UWSB_SERVER_CERT -server-cert
+UWSB_SERVER_DEBUG -server-debug
+UWSB_SERVER_KEY -server-key
+UWSB_SERVER_SHUTDOWN_TIMEOUT -server-shutdown-timeout
+UWSB_SERVER_TRUSTED_PROXIES -server-trusted-proxies
+UWSB_SSH_CONNECT_TIMEOUT -ssh-connect-timeout
+UWSB_SSH_LOGIN_TIMEOUT -ssh-login-timeout
+UWSB_SSH_TARGET -ssh-target
+UWSB_WS_HANDSHAKE_TIMEOUT -ws-handshake-timeout
